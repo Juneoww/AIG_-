@@ -1,0 +1,81 @@
+# 内网部署专用 compose：使用本地导入的镜像，不联网构建
+# 前置：在有网机器上 docker save 出 ai-infra-guard-webserver / ai-infra-guard-agent 两个镜像
+#       （如镜像名不同，用 docker tag 改成下面的名字）
+services:
+  webserver:
+    image: ai-infra-guard-webserver:v1.0.0
+    pull_policy: never
+    container_name: ai-infra-guard-webserver
+    ports:
+      - "8088:8088"
+    environment:
+      - APP_ENV=production
+      - UPLOAD_DIR=/app/uploads
+      - DB_PATH=/app/db/tasks.db
+      - TZ=Asia/Shanghai
+      - AIG_API_CHECKER_URL=http://agent:8000
+    volumes:
+      - ./data:/app/data
+      - ./db:/app/db
+      - ./logs:/app/logs
+      - ./uploads:/app/uploads
+    networks:
+      - ai-infra-guard-network
+    depends_on:
+      agent:
+        condition: service_healthy
+    restart: always
+    healthcheck:
+      test: [ "CMD", "curl", "http://localhost:8088/" ]
+      interval: 30s
+      timeout: 3s
+      start_period: 5s
+      retries: 3
+
+  agent:
+    image: ai-infra-guard-agent:v1.0.0
+    pull_policy: never
+    container_name: ai-infra-guard-agent
+    environment:
+      - TZ=Asia/Shanghai
+      - AIG_SERVER=webserver:8088
+      - AIG_API_CHECKER_ROOT_PATH=/api-checker
+      - AIG_API_CHECKER_DATA_DIR=/api-checker-data
+      - AIG_API_CHECKER_MAX_JOBS=${AIG_API_CHECKER_MAX_JOBS:-20}
+      # 内网扫描必须放开：默认拒绝私有网段目标和 HTTP 明文目标
+      - AIG_API_CHECKER_ALLOW_HTTP=${AIG_API_CHECKER_ALLOW_HTTP:-1}
+      - AIG_API_CHECKER_ALLOW_PRIVATE_TARGETS=${AIG_API_CHECKER_ALLOW_PRIVATE_TARGETS:-1}
+      - AIG_API_CHECKER_CORS_ORIGINS=${AIG_API_CHECKER_CORS_ORIGINS:-}
+    cap_add:
+      - SYS_ADMIN
+      # 允许容器内非 root 的 nmap（配合镜像内 setcap）使用 SYN 扫描，全端口扫描提速
+      - NET_RAW
+      - NET_ADMIN
+    security_opt:
+      - seccomp:unconfined
+    shm_size: '2gb'
+    volumes:
+      - api-checker-data:/api-checker-data
+    networks:
+      - ai-infra-guard-network
+    restart: always
+    healthcheck:
+      test:
+        - CMD
+        - gosu
+        - agent:agent
+        - /app/api-checker-venv/bin/python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3).read()"
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+networks:
+  ai-infra-guard-network:
+    driver: bridge
+    name: ai-infra-guard-network
+
+volumes:
+  api-checker-data:

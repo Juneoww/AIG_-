@@ -1,0 +1,37 @@
+.idea
+test
+dist
+node_modules/
+.DS_Store
+test_prompt.txt
+
+cmd/internal
+temp_uploads
+logs
+db
+uploads
+.venv
+__pycache__
+venv
+tests
+
+# OpenClaw internal workspace file
+openclaw.md
+.xac/
+yamlcheck
+.workbuddy
+.pytest_cache
+services/api_checker/.venv/
+services/api_checker/log/
+services/api_checker/result/
+services/api_checker/runtime/
+services/api_checker/pamela/results/
+services/**/__pycache__/
+services/**/*.pyc
+
+# local deployment & test artifacts
+deploy/
+common/utils/chromium/screenshot.png
+
+# Prebuilt release image (over GitHub's per-file limit); keep source and release docs in Git.
+release/v1.0.0/aig-images-v1.0.0-amd64.tar.gz

@@ -1,0 +1,131 @@
+# Stage 1: Build stage（交叉编译，跑在构建机原生架构上）
+FROM --platform=$BUILDPLATFORM golang:1.23.2-alpine AS builder
+
+# Go模块走国内代理
+ENV GOPROXY=https://goproxy.cn,direct
+
+# 目标平台架构（由 buildx --platform 自动注入）
+ARG TARGETARCH=amd64
+
+# Install necessary system dependencies
+RUN apk add --no-cache git ca-certificates
+
+# Set working directory
+WORKDIR /app
+
+COPY go.mod go.sum /app/
+
+RUN go mod download
+
+COPY . /app/
+
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=$TARGETARCH go build -ldflags="-s -w" -trimpath -buildvcs=false -o agent ./cmd/agent
+
+#
+# AIG-PromptSecurity + MCP-SCAN runtime
+#
+FROM python:3.12-slim
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/ \
+    UV_DEFAULT_INDEX=https://mirrors.aliyun.com/pypi/simple/ \
+    DEEPEVAL_TELEMETRY_OPT_OUT=YES \
+    DEEPTEAM_TELEMETRY_OPT_OUT=YES
+
+WORKDIR /app/AIG-PromptSecurity
+
+RUN set -eux; \
+    sed -i 's|http://deb.debian.org|https://mirrors.aliyun.com|g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || true; \
+    echo 'Acquire::Retries "8";' > /etc/apt/apt.conf.d/80-retries; \
+    apt-get update --allow-releaseinfo-change; \
+    apt-get install -y --no-install-recommends \
+        git \
+        curl \
+        nmap \
+        gosu \
+        libcap2-bin \
+        tzdata \
+        vim
+
+# chromium 及中文字体（独立成层，便于构建中断后缓存续跑）
+RUN apt-get install -y --no-install-recommends \
+        chromium \
+        chromium-sandbox \
+        fonts-wqy-microhei \
+        fonts-wqy-zenhei \
+        fontconfig
+
+# python 依赖编译所需的构建工具（镜像末尾会清理）
+RUN apt-get install -y --no-install-recommends \
+        build-essential \
+        gcc
+
+# nmap 由非 root 的 agent 用户调用，授予文件能力以启用 SYN 扫描（全端口扫描提速）
+RUN setcap cap_net_raw,cap_net_admin+eip "$(command -v nmap)"
+
+RUN fc-cache -fv
+
+RUN pip install --no-cache-dir uv
+COPY ./AIG-PromptSecurity /app/AIG-PromptSecurity/
+WORKDIR /app/AIG-PromptSecurity
+RUN uv sync
+
+
+
+COPY ./mcp-scan /app/mcp-scan/
+WORKDIR /app/mcp-scan
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY ./agent-scan /app/agent-scan/
+WORKDIR /app/agent-scan
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY ./skill-scan /app/skill-scan/
+WORKDIR /app/skill-scan
+RUN uv sync
+
+COPY ./services/api_checker/requirements.txt /tmp/api-checker-requirements.txt
+RUN python -m venv /app/api-checker-venv && \
+    /app/api-checker-venv/bin/pip install --no-cache-dir \
+        -r /tmp/api-checker-requirements.txt && \
+    rm /tmp/api-checker-requirements.txt
+
+RUN set -eux; \
+    apt-get purge -y --auto-remove \
+        build-essential \
+        gcc
+
+COPY --from=builder /app/agent /app/agent
+COPY --from=builder /app/data /app/data
+COPY ./services/__init__.py /app/services/__init__.py
+COPY ./services/api_checker /app/services/api_checker
+COPY ./scripts/start_agent_container.sh /app/start_agent_container.sh
+
+# Create a non-root user
+RUN useradd -m -u 1000 agent && \
+    mkdir -p /api-checker-data && \
+    chown -R agent:agent /app /api-checker-data && \
+    chmod 755 /app/start_agent_container.sh
+
+RUN chmod 4755 /usr/lib/chromium/chrome-sandbox || \
+    chmod 4755 /usr/lib/chromium/chromium-sandbox || \
+    chmod 4755 /usr/lib/chromium-browser/chrome-sandbox || \
+    true
+
+# The entrypoint fixes permissions on upgraded checker volumes, then drops to
+# the non-root agent user before starting either application process.
+WORKDIR /app
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    AIG_API_CHECKER_ROOT_PATH=/api-checker \
+    AIG_API_CHECKER_DATA_DIR=/api-checker-data \
+    AIG_API_CHECKER_LOG_LEVEL=INFO
+
+EXPOSE 8000
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD ["gosu", "agent:agent", "/app/api-checker-venv/bin/python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3).read()"]
+
+ENTRYPOINT ["/app/start_agent_container.sh"]
