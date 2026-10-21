@@ -1,0 +1,11 @@
+{
+  "services": {
+    "webserver": {
+      "volumes": [
+        {"type": "bind", "source": "${AIG_PLATFORM_RULE_ROOT}/fingerprints", "target": "/app/data/fingerprints", "bind": {"create_host_path": false}},
+        {"type": "bind", "source": "${AIG_PLATFORM_RULE_ROOT}/vuln", "target": "/app/data/vuln", "bind": {"create_host_path": false}},
+        {"type": "bind", "source": "${AIG_PLATFORM_RULE_ROOT}/vuln_en", "target": "/app/data/vuln_en", "bind": {"create_host_path": false}}
+      ]
+    }
+  }
+}

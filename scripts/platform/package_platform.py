@@ -11,11 +11,12 @@ import datetime
 import hashlib
 import io
 import json
+import shutil
 from pathlib import Path
 import sys
 import tarfile
 
-from platform_upgrade import VERSION, SOURCE_IMAGES, require, safe_member, sha256, validate_bundle
+from platform_upgrade import VERSION, SOURCE_IMAGES, require, safe_member, sha256, validate_bundle, load_compose_templates
 
 
 def wrapper(digest, helper):
@@ -65,6 +66,11 @@ def build(args):
     require(stage.is_dir() and stage != output and stage not in output.parents and output not in stage.parents, 'stage/output必须为独立目录')
     require(args.rule_tools_verified, '必须先验证v1.1.1双服务规则管理工具，再传--rule-tools-verified')
     require((stage / 'tools/rules-compatible').is_dir() and any((stage / 'tools/rules-compatible').iterdir()), '包必须携带兼容规则工具')
+    template_source = Path(__file__).with_name('compose')
+    load_compose_templates(template_source)
+    if not (stage / 'compose').exists():
+        shutil.copytree(template_source, stage / 'compose')
+    load_compose_templates(stage / 'compose')
     helper = Path(__file__).with_name('platform_upgrade.py').read_bytes()
     (stage / 'tools').mkdir(exist_ok=True)
     (stage / 'tools/platform_upgrade.py').write_bytes(helper)
@@ -82,6 +88,7 @@ def build(args):
         entries.append({'path': name, 'size': path.stat().st_size, 'sha256': sha256(path)})
     manifest = {'type': 'platform', 'version': VERSION, 'contract_version': '1.0',
                 'source_versions': ['v1.1.0'], 'source_commit': args.source_commit,
+                'image_source_commit': getattr(args, 'image_source_commit', None) or args.source_commit,
                 'source_images': SOURCE_IMAGES,
                 'built_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
                 'architecture': 'linux/amd64', 'contains_infrastructure_rules': False,
@@ -120,6 +127,7 @@ def main():
     parser.add_argument('--stage', required=True)
     parser.add_argument('--output', required=True)
     parser.add_argument('--source-commit', required=True)
+    parser.add_argument('--image-source-commit', help='复用已验证镜像时记录其实际源码提交，默认与本次源码提交相同')
     parser.add_argument('--web-reference', required=True)
     parser.add_argument('--web-id', required=True)
     parser.add_argument('--agent-reference', required=True)

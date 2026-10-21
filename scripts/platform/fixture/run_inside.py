@@ -141,6 +141,8 @@ def main():
     assert not (BASE / 'backups').exists()
     report['readonly_check'] = True
     manifest = u.validate_bundle(package)
+    assert all('compose/' + name in {item['path'] for item in manifest['files']} for name in u.COMPOSE_NAMES)
+    report['bundle_contains_three_templates'] = True
     layout = u.discover(manifest['source_images'])
     Disk = namedtuple('Disk', 'total used free')
     with patch.object(u.shutil, 'disk_usage', return_value=Disk(1024, 1024, 0)):
@@ -206,6 +208,17 @@ def main():
     report['upgrade_output'] = invoke(entry)
     report['rules_unchanged'] = u.current_rules() == rules_before
     marker = json.loads((u.NEW / 'PLATFORM-DEPLOYED.json').read_text())
+    program, upgrade, rules = [json.loads((u.NEW / name).read_text()) for name in u.COMPOSE_NAMES]
+    assert all('volumes' not in program['services'][role] for role in ('webserver', 'agent'))
+    assert len(upgrade['services']['webserver']['volumes']) == 4
+    assert len(rules['services']['webserver']['volumes']) == 3
+    effective = json.loads(run(u.compose_command('aig-v111', marker['candidate_compose']) + ['config', '--format', 'json']))
+    assert effective['services']['webserver']['ports'][0]['published'] == '18888'
+    assert effective['services']['webserver']['environment']['ROLE'] == 'web'
+    assert len(effective['services']['webserver']['volumes']) == 7
+    assert effective['volumes']['platform-checker']['name'] == marker['new_checker_volume']
+    assert all('${AIG_PLATFORM_' not in json.dumps(document) for document in (program, upgrade, rules))
+    report['three_templates_used_preserving_site_configuration'] = True
     backup = next(p for p in (BASE / 'backups').iterdir() if json.loads((p / 'STATE.json').read_text()).get('success'))
     assert u.database_snapshot(OLD / 'db/tasks.db') == u.database_snapshot(u.NEW / 'db/tasks.db')
     assert marker['new_checker_volume'] != marker['old_checker_volume']

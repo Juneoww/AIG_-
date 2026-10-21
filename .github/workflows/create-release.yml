@@ -10,6 +10,8 @@ env:
 
 jobs:
   create-release:
+    # v1.1.1 由纯平台交付流程上传两个已校验文件，避免旧流程重新打包整个 data。
+    if: ${{ github.ref != 'refs/tags/v1.1.1' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write

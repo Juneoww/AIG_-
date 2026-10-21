@@ -7,6 +7,8 @@ import hashlib
 import importlib.util
 import io
 import json
+import copy
+import shutil
 from pathlib import Path
 import sqlite3
 import tarfile
@@ -31,9 +33,12 @@ class PlatformTest(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
 
-    def package(self, extra=None, mutate=None):
+    def package(self, extra=None, mutate=None, include_templates=True):
         payload = {'tools/platform_upgrade.py': b'# harmless helper\n', 'tools/rules-compatible/adapter.py': b'# harmless adapter\n', 'images/runtime.tar.gz': b'image',
                    'LICENSE': b'license', 'NOTICE': b'notice', 'RELEASE-NOTES.md': b'release', 'OPERATIONS.md': b'operations'}
+        if include_templates:
+            for path in self.module_path.with_name('compose').glob('*.yml'):
+                payload['compose/' + path.name] = path.read_bytes()
         if extra:
             payload.update(extra)
         manifest = {'type': 'platform', 'version': 'v1.1.1', 'source_versions': ['v1.1.0'],
@@ -61,6 +66,72 @@ class PlatformTest(unittest.TestCase):
         before = sorted(p.name for p in self.root.iterdir())
         self.assertEqual(self.u.validate_bundle(path)['version'], 'v1.1.1')
         self.assertEqual(before, sorted(p.name for p in self.root.iterdir()))
+
+    def test_bundle_without_contract_compose_templates_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, 'Compose|模板'):
+            self.u.validate_bundle(self.package(include_templates=False))
+
+    def test_deployment_requires_real_templates_before_writing_configuration(self):
+        new = self.root / 'v1.1.1'
+        new.mkdir()
+        work = self.root / 'backup'
+        work.mkdir()
+        with patch.object(self.u, 'NEW', new):
+            with self.assertRaisesRegex(ValueError, 'Compose|模板'):
+                self.u.new_compose({'compose': {}}, {'images': {}}, 'checker-fixture', work)
+        self.assertEqual(list(new.iterdir()), [])
+
+    def test_rule_template_cannot_redirect_shared_rules(self):
+        path = self.module_path.with_name('compose') / 'docker-compose.rules.yml'
+        content = json.loads(path.read_text(encoding='utf-8'))
+        content['services']['webserver']['volumes'][0]['source'] = '${AIG_PLATFORM_PROGRAM}/data/fingerprints'
+        with self.assertRaisesRegex(ValueError, 'Compose|契约'):
+            self.u.validate_bundle(self.package({'compose/' + path.name: json.dumps(content).encode()}))
+
+    def test_program_template_cannot_reset_existing_ports(self):
+        path = self.module_path.with_name('compose') / 'docker-compose.intranet.yml'
+        content = json.loads(path.read_text(encoding='utf-8'))
+        content['services']['webserver']['ports'] = ['8088:8088']
+        with self.assertRaisesRegex(ValueError, 'Compose|现场'):
+            self.u.validate_bundle(self.package({'compose/' + path.name: json.dumps(content).encode()}))
+
+    def test_rendered_templates_preserve_site_settings_and_separate_mounts(self):
+        new = self.root / 'v1.1.1'
+        new.mkdir()
+        work = self.root / 'backup'
+        (work / 'resource').mkdir(parents=True)
+        shutil.copytree(self.module_path.with_name('compose'), work / 'resource/compose')
+        web_mounts = [{'type': 'bind', 'source': str(self.u.OLD / name), 'target': '/app/' + name,
+                       'read_only': False, 'bind': {'create_host_path': False}} for name in ('data', 'db', 'logs', 'uploads')]
+        web_mounts += [{'type': 'bind', 'source': str(self.u.RULES / scope), 'target': '/app/data/' + scope,
+                        'read_only': True, 'bind': {'create_host_path': False, 'propagation': 'rprivate'}} for scope in self.u.SCOPES]
+        original = {'name': 'site-project', 'services': {
+            'webserver': {'image': 'old-web:v1.1.0', 'ports': ['127.0.0.1:19080:8088'],
+                          'environment': {'SITE_SETTING': 'fixture-preserved'}, 'volumes': web_mounts},
+            'agent': {'image': 'old-agent:v1.1.0', 'environment': {'AIG_SERVER': 'webserver:8088'},
+                      'cap_add': ['SYS_ADMIN'], 'volumes': [{'type': 'volume', 'source': 'checker', 'target': '/api-checker-data'}]}},
+            'volumes': {'checker': {'name': 'old-checker'}}, 'networks': {'internal': {'name': 'site-network'}}}
+        before = copy.deepcopy(original)
+        layout = {'compose': original, 'project': 'site-project', 'network': {'Name': 'site-network'}}
+        manifest = {'images': {role: {'reference': 'local/' + role + ':v1.1.1'} for role in ('webserver', 'agent')}}
+        with patch.object(self.u, 'NEW', new):
+            paths = self.u.new_compose(layout, manifest, 'independent-new-checker', work)
+        program, upgrade, rules = [json.loads(path.read_text(encoding='utf-8')) for path in paths]
+        self.assertEqual(original, before)
+        self.assertEqual(program['services']['webserver']['ports'], ['127.0.0.1:19080:8088'])
+        self.assertEqual(program['services']['webserver']['environment'], {'SITE_SETTING': 'fixture-preserved'})
+        self.assertEqual(program['services']['agent']['cap_add'], ['SYS_ADMIN'])
+        self.assertEqual(program['networks']['internal'], {'name': 'site-network', 'external': True})
+        self.assertNotIn('volumes', program['services']['webserver'])
+        self.assertEqual(len(upgrade['services']['webserver']['volumes']), 4)
+        self.assertEqual(upgrade['volumes']['platform-checker'], {'name': 'independent-new-checker', 'external': True})
+        self.assertEqual(upgrade['services']['webserver']['volumes'][0]['source'], str(new / 'data'))
+        self.assertEqual(len(rules['services']['webserver']['volumes']), 3)
+        for mount in rules['services']['webserver']['volumes']:
+            self.assertTrue(mount['read_only'])
+            self.assertEqual(mount['bind'], {'create_host_path': False, 'propagation': 'rprivate'})
+            self.assertEqual(mount['source'], str(self.u.RULES / mount['target'].rsplit('/', 1)[1]))
+        self.assertNotIn('${AIG_PLATFORM_', ''.join(path.read_text() for path in paths))
 
     def test_path_traversal_rejected(self):
         with self.assertRaisesRegex(ValueError, '路径'):

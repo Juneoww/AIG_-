@@ -37,6 +37,49 @@ SOURCE_IMAGES = {
     'webserver': 'sha256:9cfc382ead21bc32a99d3ae43826695d59286f1cce164b2cfd53668c175d898d',
     'agent': 'sha256:c2e81a8e49d2d1bde7bdff780a0e0681a920128627789f06f46df5fd6a24a918',
 }
+COMPOSE_NAMES = ('docker-compose.intranet.yml', 'docker-compose.upgrade.yml', 'docker-compose.rules.yml')
+
+
+def validate_compose_templates(documents):
+    """模板只描述发布策略，端口、环境和网络从实际部署继承，禁止模板隐含替换。"""
+    require(set(documents) == set(COMPOSE_NAMES), '缺少契约要求的三份Compose模板')
+    program, upgrade, rules = (documents[name] for name in COMPOSE_NAMES)
+    require(set(program) == {'services'} and set(program['services']) == {'webserver', 'agent'}, 'Compose程序模板服务不符')
+    for role, token in (('webserver', '${AIG_PLATFORM_WEB_IMAGE}'), ('agent', '${AIG_PLATFORM_AGENT_IMAGE}')):
+        require(program['services'][role] == {'image': token, 'pull_policy': 'never',
+                'container_name': 'ai-infra-guard-' + role + '-v111'}, 'Compose程序模板不能替换现场端口、环境或命令')
+    require(set(upgrade) == {'services', 'volumes'} and set(upgrade['services']) == {'webserver', 'agent'}, 'Compose业务模板结构不符')
+    require(upgrade['volumes'] == {'platform-checker': {'name': '${AIG_PLATFORM_CHECKER_VOLUME}', 'external': True}}, 'Compose必须使用独立外部Checker卷')
+    require(set(rules) == {'services'} and set(rules['services']) == {'webserver'}, 'Compose规则模板结构不符')
+
+    def binds(service, expected):
+        require(isinstance(service, dict) and set(service) == {'volumes'} and isinstance(service['volumes'], list), 'Compose挂载模板字段不符')
+        values = service['volumes']
+        require(len(values) == len(expected), 'Compose挂载模板数量不符')
+        targets = [value.get('target') for value in values if isinstance(value, dict)]
+        require(len(targets) == len(values) and len(set(targets)) == len(values) and set(targets) == set(expected), 'Compose挂载模板目标重复或缺失')
+        for value in values:
+            target = value['target']
+            require(value == {'type': 'bind', 'source': expected[target], 'target': target, 'bind': {'create_host_path': False}},
+                    'Compose挂载模板路径或属性不符合契约: ' + target)
+
+    binds(upgrade['services']['webserver'], {'/app/' + name: '${AIG_PLATFORM_PROGRAM}/' + name for name in ('data', 'db', 'logs', 'uploads')})
+    require(upgrade['services']['agent'] == {'volumes': [{'type': 'volume', 'source': 'platform-checker', 'target': '/api-checker-data'}]}, 'Compose Agent卷模板不符')
+    binds(rules['services']['webserver'], {'/app/data/' + scope: '${AIG_PLATFORM_RULE_ROOT}/' + scope for scope in SCOPES})
+
+
+def load_compose_templates(root):
+    root = Path(root)
+    documents = {}
+    for name in COMPOSE_NAMES:
+        path = root / name
+        require(path.is_file() and not path.is_symlink() and path.stat().st_size < 256 * 1024, '缺少或无效Compose模板: ' + name)
+        try:
+            documents[name] = json.loads(path.read_text(encoding='utf-8'))
+        except (ValueError, UnicodeError) as error:
+            raise ValueError('Compose模板必须为JSON格式的合法YAML: ' + name) from error
+    validate_compose_templates(documents)
+    return documents
 
 
 def require(value, message):
@@ -108,7 +151,17 @@ def validate_bundle(path, extract=None):
             expected[name] = entry
         actual = {name for name, member in members.items() if member.isfile()}
         require(actual == set(expected) | {'manifest.json', 'SHA256SUMS.txt'}, '归档文件集合与清单不同')
-        required = {'tools/platform_upgrade.py', 'LICENSE', 'NOTICE', 'RELEASE-NOTES.md', 'OPERATIONS.md'}
+        compose_paths = {'compose/' + name for name in COMPOSE_NAMES}
+        require(compose_paths.issubset(expected), '包缺少契约要求的三份Compose模板')
+        require(all(members[name].size < 256 * 1024 for name in compose_paths), 'Compose模板过大')
+        try:
+            documents = {name: json.load(archive.extractfile(members['compose/' + name])) for name in COMPOSE_NAMES}
+        except (ValueError, UnicodeError) as error:
+            raise ValueError('Compose模板内容无效') from error
+        validate_compose_templates(documents)
+        if 'image_source_commit' in manifest:
+            require(re.fullmatch('[0-9a-f]{40}', manifest['image_source_commit']), '需要完整镜像源码提交')
+        required = {'tools/platform_upgrade.py', 'LICENSE', 'NOTICE', 'RELEASE-NOTES.md', 'OPERATIONS.md'} | compose_paths
         require(required.issubset(expected) and any(n.startswith('images/') for n in expected), '包缺少必要负载')
         require(any(n.startswith('tools/rules-compatible/') for n in expected), '包缺少兼容规则工具负载')
         checksums = archive.extractfile(members['SHA256SUMS.txt']).read().decode('utf-8')
@@ -576,13 +629,26 @@ print(json.dumps(r,sort_keys=True))"""
 
 
 def new_compose(layout, manifest, checker_volume, work):
+    templates = load_compose_templates(Path(work) / 'resource/compose')
+    values = {'${AIG_PLATFORM_WEB_IMAGE}': manifest['images']['webserver']['reference'],
+              '${AIG_PLATFORM_AGENT_IMAGE}': manifest['images']['agent']['reference'],
+              '${AIG_PLATFORM_CHECKER_VOLUME}': checker_volume}
+    values.update({'${AIG_PLATFORM_PROGRAM}/' + name: str(NEW / name) for name in ('data', 'db', 'logs', 'uploads')})
+    values.update({'${AIG_PLATFORM_RULE_ROOT}/' + name: str(RULES / name) for name in SCOPES})
+
+    def render(value):
+        if isinstance(value, dict):
+            return {key: render(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [render(item) for item in value]
+        return values.get(value, value) if isinstance(value, str) else value
+
+    program_template, upgrade_template, rules_template = (render(templates[name]) for name in COMPOSE_NAMES)
     configuration = copy.deepcopy(layout['compose'])
     configuration['name'] = 'aig-v111'
     for service in ('webserver', 'agent'):
         item = configuration['services'][service]
-        item['image'] = manifest['images'][service]['reference']
-        item['pull_policy'] = 'never'
-        item['container_name'] = 'ai-infra-guard-' + service + '-v111'
+        item.update(program_template['services'][service])
         for mount in item.get('volumes', []):
             if mount['type'] == 'bind' and mount['source'].startswith(str(OLD) + '/'):
                 mount['source'] = str(NEW) + mount['source'][len(str(OLD)):]
@@ -591,16 +657,28 @@ def new_compose(layout, manifest, checker_volume, work):
                 require(mount['target'] == '/api-checker-data', '未知命名卷')
                 mount['source'] = 'platform-checker'
         item.pop('env_file', None)
-    configuration['volumes'] = {'platform-checker': {'name': checker_volume, 'external': True}}
+    # 以目标路径合并，保留原有read_only/传播等挂载属性；模板固定来源及禁止自动建目录。
+    for service in ('webserver', 'agent'):
+        actual = {mount['target']: mount for mount in configuration['services'][service].pop('volumes')}
+        for document in (upgrade_template, rules_template):
+            for mount in document.get('services', {}).get(service, {}).get('volumes', []):
+                inherited = copy.deepcopy(actual[mount['target']])
+                bind = {**inherited.get('bind', {}), **mount.get('bind', {})}
+                inherited.update(mount)
+                if bind:
+                    inherited['bind'] = bind
+                mount.clear()
+                mount.update(inherited)
+    configuration.pop('volumes', None)
     for key, network in configuration.get('networks', {}).items():
         actual_name = network.get('name') or layout['project'] + '_' + key
         require(actual_name == layout['network']['Name'], 'Compose网络与现场不同')
         configuration['networks'][key] = {'name': actual_name, 'external': True}
-    paths = [NEW / name for name in ('docker-compose.intranet.yml', 'docker-compose.upgrade.yml', 'docker-compose.rules.yml')]
-    # JSON也是合法YAML；三个固定文件名继续满足独立规则管理工具的完整配置契约。
+    paths = [NEW / name for name in COMPOSE_NAMES]
+    # 三份文件分别承载程序/现场配置、业务挂载与共享规则挂载，均来自已校验模板。
     save(paths[0], configuration)
-    save(paths[1], {'services': {}})
-    save(paths[2], {'services': {}})
+    save(paths[1], upgrade_template)
+    save(paths[2], rules_template)
     return paths
 
 

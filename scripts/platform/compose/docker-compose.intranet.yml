@@ -1,0 +1,14 @@
+{
+  "services": {
+    "webserver": {
+      "image": "${AIG_PLATFORM_WEB_IMAGE}",
+      "pull_policy": "never",
+      "container_name": "ai-infra-guard-webserver-v111"
+    },
+    "agent": {
+      "image": "${AIG_PLATFORM_AGENT_IMAGE}",
+      "pull_policy": "never",
+      "container_name": "ai-infra-guard-agent-v111"
+    }
+  }
+}

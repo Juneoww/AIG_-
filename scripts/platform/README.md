@@ -43,7 +43,7 @@ docker compose -p aig-v111 \
   -f docker-compose.rules.yml ps
 ```
 
-规范化实际配置写入 intranet 文件；另外两个文件保留规则管理工具要求的完整配置接口。JSON 内容也是合法 YAML。实际环境可能含密钥，三个配置文件仅 root 可读，不作为交付资源或公开诊断上传。
+资源包包含并由安装器实际渲染三份 Compose 模板：intranet 文件固定本版程序镜像及容器身份，upgrade 文件适配继承的业务 bind 和独立 Checker 卷，rules 文件保留三个精确规则 bind。安装器继承现场生效的环境、发布端口及网络配置，不用模板默认值重置现场配置。模板采用 JSON 格式，也是合法 YAML。生成后的实际配置可能含密钥，仅 root 可读，不作为公开诊断上传。
 
 必须通过 Web/Agent 容器健康、API Checker `/healthz`、Web 内存中的真实 Agent 连接状态、三个知识库读取结果、历史数据库及业务文件一致性检查，才能恢复访问并写入 `PLATFORM-DEPLOYED.json`。验收不会默认扫描真实目标，也不要求模型配置。
 
@@ -72,6 +72,9 @@ sudo bash /opt/aig/packages/platform/v1.1.1/deploy-platform-v1.1.1.sh \
 
 ```text
 images/离线镜像.tar.gz
+compose/docker-compose.intranet.yml
+compose/docker-compose.upgrade.yml
+compose/docker-compose.rules.yml
 tools/rules-compatible/兼容管理工具（不含任何规则资源包）
 RELEASE-NOTES.md
 OPERATIONS.md
@@ -79,18 +82,23 @@ LICENSE
 NOTICE
 ```
 
-打包器自动加入 `tools/platform_upgrade.py`、`manifest.json` 与 `SHA256SUMS.txt`。`OPERATIONS.md` 可以使用本文。镜像层及最终文件系统无三个规则资源目录的验证由运行镜像构建工具负责，记录作为发布验收依据。兼容管理工具应能把可信历史规则交付转换为独立的 v1.1.1 兼容入口，保持内层规则逐字不变；转换不等于执行规则更新。
+打包器自动加入 `tools/platform_upgrade.py`、`manifest.json` 与 `SHA256SUMS.txt`；stage 未放置 `compose/` 时从 `scripts/platform/compose/` 复制三份模板，并校验模板完整性与用途。`OPERATIONS.md` 使用 [平台升级操作文档](../../docs/AI-Infra-Scan_Plus/platform-upgrade-operations.md)。镜像层及最终文件系统无三个规则资源目录的验证由运行镜像构建工具负责，记录作为发布验收依据。
+
+规则兼容转换器仅接受摘要白名单中的原始配套交付 `rules-2026.10.10-002` 和 `rules-2026.10.19-004`，未知、改动或混配输入均拒绝。安装后的入口位于 `/opt/aig/v1.1.1/platform-tools/rules-compatible/prepare_rules_v111.py`；通过 `--script 原脚本 --resource 原资源包 --output 新目录` 生成独立兼容交付，只改变管理代码的路径与版本检查，原交付及内层规则字节保持不变。生成兼容交付不会执行规则更新，平台包本身不包含这两份规则资源包。
 
 ```bash
 python scripts/platform/package_platform.py \
   --stage 已验证stage目录 --output 新交付目录 \
   --source-commit 完整源码提交 \
+  --image-source-commit 实际运行镜像源码提交 \
   --web-reference ai-infra-guard-webserver:v1.1.1 --web-id sha256:实际Web镜像ID \
   --agent-reference ai-infra-guard-agent:v1.1.1 --agent-id sha256:实际Agent镜像ID \
   --rule-tools-verified
 ```
 
 打包输出两个文件的 SHA256。脚本内固定配套包 SHA256，内嵌执行工具，不依赖操作者解压；摘要用于检测损坏和混包，仍须通过可信渠道取得文件。
+
+本次重打包使用新目录 `release/v1.1.1-contract-20261021/`，保留 `release/v1.1.1/` 的历史文件。重新生成的是管理工具、模板和说明；复用已验证的运行镜像时，清单以 `image_source_commit` 单独记录其源码提交，不能把本次打包提交当作重新构建镜像的依据。GitHub v1.1.1 发布只上传上述两个外部文件。
 
 单元验证：`python scripts/platform/test_platform_upgrade.py`（Linux，含 cp -a）。真实事务验收使用 `fixture/Dockerfile.harness` 和 `fixture/Dockerfile.runtime` 创建测试镜像，再运行 `docker_fixture_test.py --evidence 新目录 [--adapter-root 已生成兼容交付目录]`。测试使用专属随机容器、独立内层 Docker 引擎及无扫描能力的受控服务，无宿主 Docker socket，不操作现存业务容器。测试 fixture 不进入正式包。
 
