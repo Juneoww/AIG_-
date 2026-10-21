@@ -64,7 +64,7 @@ sudo bash /opt/aig/packages/platform/v1.1.1/deploy-platform-v1.1.1.sh \
 
 共享规则在平台回滚中保持不动。升级后若规则已经变化，自动回滚拒绝；须先独立验证旧程序兼容性，不能借平台回滚恢复旧规则。
 
-断电和 SIGKILL 不能保证自动恢复。保留现场，读取 `STATE.json` 核对源/候选容器的实际 ID、镜像、挂载和运行状态；先停止仍在运行的候选，保证没有同端口双写，再依据记录启动原 Agent/Web。`maintenance-restore.json` 记录本次维护策略的撤销命令，按倒序逐条核对执行，不清空全局防火墙。恢复与验收失败时保持维护入口并安排人工处理。禁止 `down -v`、prune、删除历史目录或原卷。
+断电和 SIGKILL 不能保证自动恢复。保留现场，读取 `STATE.json`、`ROLLBACK.json` 核对源/候选容器的实际 ID、镜像、挂载和运行状态。若记录 `access_may_be_public=true`，开放访问已经开始，必须保留 `accepted_service` 对应的当前写入版本，先保存其数据并处理维护策略，禁止直接切回另一快照。只有确认候选尚未开放访问时，才能先停止候选、确保没有同端口双写，再依据记录启动原 Agent/Web。`maintenance-restore.json` 记录本次维护策略的撤销命令，按倒序逐条核对执行，不清空全局防火墙。恢复与验收失败时保持维护入口并安排人工处理。禁止 `down -v`、prune、删除历史目录或原卷。
 
 ## 发布方构建
 

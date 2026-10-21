@@ -184,7 +184,7 @@ def main():
             raise RuntimeError('fixture-injected-candidate-start-failure')
         return original_run(args, **kwargs)
     def disk_full_diagnostics(path, value):
-        if value.get('phase') == 'failed':
+        if isinstance(value, dict) and value.get('phase') == 'failed':
             failed_diagnostic.update(value)
             raise OSError('fixture-injected-disk-full-during-recovery-record')
         return original_save(path, value)

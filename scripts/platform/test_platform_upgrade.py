@@ -13,6 +13,7 @@ import tarfile
 import tempfile
 import unittest
 import contextlib
+import inspect
 from unittest.mock import patch
 
 
@@ -205,15 +206,18 @@ class PlatformTest(unittest.TestCase):
 
     def test_access_opening_is_marked_before_teardown_can_expose_writes(self):
         self.assertTrue(hasattr(self.u, 'begin_access_opening'), 'access transition must preserve potentially exposed writers')
+        self.assertIn('record_path', inspect.signature(self.u.begin_access_opening).parameters, 'opening phase must persist before exposing writes')
         state = {}
+        record = self.root / 'opening.json'
         class Gate:
             def end(self):
                 self_test.assertEqual(state['phase'], 'opening-access')
                 self_test.assertEqual(state['accepted_service'], 'candidate')
+                self_test.assertTrue(json.loads(record.read_text())['access_may_be_public'])
                 raise RuntimeError('partial teardown exposed candidate')
         self_test = self
         with self.assertRaisesRegex(RuntimeError, 'partial teardown'):
-            self.u.begin_access_opening(Gate(), state, 'candidate')
+            self.u.begin_access_opening(Gate(), state, 'candidate', record)
         self.assertTrue(state['access_may_be_public'])
 
     def test_staging_packager_creates_self_contained_pinned_entry(self):

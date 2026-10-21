@@ -343,9 +343,10 @@ def best_effort_save(path, value):
         return False
 
 
-def begin_access_opening(gate, state, accepted_service):
+def begin_access_opening(gate, state, accepted_service, record_path):
     # 撤销第一条规则便可能接收写入；在调用前进入不可自动切换旧快照的阶段。
     state.update(phase='opening-access', access_may_be_public=True, accepted_service=accepted_service)
+    save(record_path, state)
     gate.end()
 
 
@@ -729,7 +730,7 @@ def upgrade(bundle, manifest):
         require(current_rules() == rules_before, '共享规则字节或属性变化，拒绝成功')
         state.update(phase='validated', acceptance=acceptance, manifest=manifest, new_web=web, new_agent=agent)
         save(work / 'STATE.json', state)
-        begin_access_opening(gate, state, 'candidate')
+        begin_access_opening(gate, state, 'candidate', work / 'STATE.json')
         state.update(phase='deployed', success=True, completed_at=datetime.datetime.now(datetime.timezone.utc).isoformat())
         save(work / 'STATE.json', state)
         save(NEW / 'PLATFORM-DEPLOYED.json', state)
@@ -794,7 +795,7 @@ def rollback(backup):
         since = datetime.datetime.now(datetime.timezone.utc).isoformat()
         run(['docker', 'start', layout['agent']['Id'], layout['web']['Id']], timeout=120)
         wait_health(layout['web']['Id'], layout['agent']['Id'], since, state['knowledge_before'])
-        begin_access_opening(gate, rollback_info, 'source')
+        begin_access_opening(gate, rollback_info, 'source', backup / 'ROLLBACK.json')
         rollback_info['success'] = True
         rollback_info['phase'] = 'rolled-back'
         save(backup / 'ROLLBACK.json', rollback_info)

@@ -13,28 +13,28 @@
 
 ## Task 1 后处理可终止且保留检测结果
 Files: common/agent/tasks.go、新postprocess模块与回归测试；common/runner/ai.go；common/utils/chromium/screenshot.go；common/utils/api.go；common/runner/types.go按需增加可选状态字段。
-- [ ] 先写失败测试：155结果中1截图阻塞，其他结果保留、最终报告有可见postprocess状态；取消及时结束且无goroutine泄漏。
-- [ ] 截图创建/连接/导航/截图/关闭贯穿context，清理另有短截止；不以放弃仍运行后台goroutine冒充超时。
-- [ ] 上传使用request context和超时；AI后处理使用派生context，操作时限由环境配置且保留保守默认。
-- [ ] 保留公共旧函数包装以兼容其他调用；截图与上传失败不删除基础结果，额外字段兼容旧前端，并在现有日志显示目标脱敏身份与阶段。
-- [ ] 测试先RED后GREEN；真实Linux Chromium回环慢响应/取消验证不触及现场IP。
+- [x] 先写失败测试：155结果中1截图阻塞，其他结果保留、最终报告有可见postprocess状态；取消及时结束且无goroutine泄漏。
+- [x] 截图创建/连接/导航/截图/关闭贯穿context，清理另有短截止；不以放弃仍运行后台goroutine冒充超时。
+- [x] 上传使用request context和超时；AI后处理使用派生context，操作时限由环境配置且保留保守默认。
+- [x] 保留公共旧函数包装以兼容其他调用；截图与上传失败不删除基础结果，额外字段兼容旧前端，并在现有日志显示目标脱敏身份与阶段。
+- [x] 测试先RED后GREEN；真实Linux Chromium回环慢响应/取消验证不触及现场IP。
 
 ## Task 2 Web事件与Agent状态
 Files: common/websocket/agent.go、task_manager.go、新连接回归测试；pkg/database/task.go及新轻量状态/失联更新模块。
-- [ ] 先写失败测试：状态检查不读取Messages；慢事件消费仍持续读取Pong；同连接事件有序；连接更替不误删新连接或错误结束新任务。
-- [ ] 状态检查只查必要Session列；不改变任务详情GetSession加载契约。
-- [ ] 使用有界队列与单顺序消费者隔离事件持久化和socket读取；队列溢出明确失败并保留已入库事件，不能静默丢数据；多个连接无全局长锁。
-- [ ] 所有Web写经同一writer锁；心跳日志正确区分超时和正常关闭。
-- [ ] 失联更新只针对该连接仍负责的doing任务；同AgentID替换须防旧cleanup干扰新连接；不自动重新派发。
-- [ ] 新旧API兼容；必要的error事件存库并发SSE，Agent重启旧任务不永久doing。
-- [ ] 定向与race测试、真实WebSocket批量事件回环验证。
+- [x] 先写失败测试：状态检查不读取Messages；慢事件消费仍持续读取Pong；同连接事件有序；连接更替不误删新连接或错误结束新任务。
+- [x] 状态检查只查必要Session列；不改变任务详情GetSession加载契约。
+- [x] 使用有界队列与单顺序消费者隔离事件持久化和socket读取；队列溢出明确失败并保留已入库事件，不能静默丢数据；多个连接无全局长锁。
+- [x] 所有Web写经同一writer锁；心跳日志正确区分超时和正常关闭。
+- [x] 失联更新只针对该连接仍负责的doing任务；同AgentID替换须防旧cleanup干扰新连接；不自动重新派发。
+- [x] 新旧API兼容；必要的error事件存库并发SSE，Agent重启旧任务不永久doing。
+- [x] 定向与race测试、真实WebSocket批量事件回环验证。
 
 ## Task 3 端口发现可取消并受控并发
 Files: common/utils/nmap.go；common/portscan新增批量调度与测试；common/agent/tasks.go只由任务1负责人集成调用；common/runner/runner.go。
-- [ ] 先写失败测试：多个IP有限并发、全端口参数保留、稳定去重、单目标错误显式记录、取消停止新进程并回收运行进程。
-- [ ] 引入NmapScanContext并保留NmapScan兼容；按小批次或有限worker执行，避免每IP串行阻塞整段。
-- [ ] 不设置会静默删减覆盖的短host-timeout；如配置超时，任务明确失败/未完成，不当作无开放端口。
-- [ ] 旧前端回传已处理/总数并节流，保留每目标错误信息；无需新增UI重设计。
+- [x] 先写失败测试：多个IP有限并发、全端口参数保留、稳定去重、单目标错误显式记录、取消停止新进程并回收运行进程。
+- [x] 引入NmapScanContext并保留NmapScan兼容；按小批次或有限worker执行，避免每IP串行阻塞整段。
+- [x] 不设置会静默删减覆盖的短host-timeout；如配置超时，任务明确失败/未完成，不当作无开放端口。
+- [x] 旧前端回传已处理/总数并节流，保留每目标错误信息；无需新增UI重设计。
 
 ## Task 4 纯平台交付与运维工具
 Files: release/v1.1.1/、scripts/platform/、打包工具及隔离测试；版本常量；API中英说明及swagger按字段变化同步。
