@@ -35,3 +35,7 @@ common/utils/chromium/screenshot.png
 
 # Prebuilt release image (over GitHub's per-file limit); keep source and release docs in Git.
 release/v1.0.0/aig-images-v1.0.0-amd64.tar.gz
+
+# Maintenance release build/validation artifacts stay local.
+/upgrade-validation/
+/release/v1.1.1/*.tar.gz

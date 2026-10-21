@@ -1484,3 +1484,18 @@ except Exception as e:
 ## 技术支持
 
 如有问题，请联系技术支持团队或查看项目文档。
+
+
+## v1.1.1 扫描完整性与 Agent 就绪状态
+
+`GET /api/v1/agents/status` 返回 `{"connected_count":1,"agents":[{"agent_id":"...","connected":true}]}`，仅统计已注册且在线的 Agent；此只读接口不会触发或恢复扫描。
+
+基础设施报告保留 `total`、`score`、`results`，新增以下兼容字段：
+
+- `completion_status`：`complete`、`incomplete`、`cancelled`，分别表示完成、覆盖未完成、已取消。
+- `coverage`：`targets_total` 总目标数、`scan_succeeded` 成功数、`scan_failed` 失败数、`scan_unfinished` 未执行完成数、`discovery_failed` 端口发现失败数、`postprocess_failed` 后处理失败数、`complete` 是否覆盖完整。
+- `target_errors`：逐项记录 `target`、`stage`、`error`。
+- 结果中的 `postprocess`：截图、上传、AI 的完成状态及错误。
+- `score_valid=false` 表示评分不能代表全部覆盖；`score_scope=completed_targets_only` 表示评分仅基于已完成目标。
+
+截图、上传或 AI 失败不会删除已有基础检测证据。部分覆盖且零漏洞不能解释为目标安全。Agent 断联保留已入库事件，仅将该连接负责的运行任务明确标记失败；重连不会自动续扫，Web 启动不静默改写历史任务状态。

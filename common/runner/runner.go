@@ -21,11 +21,13 @@ package runner
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"net/http"
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -70,12 +72,27 @@ type Step01 struct {
 
 // New 初始化一个新的 Runner 实例
 func New(options2 *options.Options) (*Runner, error) {
+	if options2.Context == nil {
+		options2.Context = context.Background()
+	}
 	runner := &Runner{
 		Options: options2,
 		total:   0,
 		done:    make(chan struct{}), // 初始化done通道用于优雅关闭
 	}
 
+	// 初始化失败也关闭已创建的存储和网络资源。
+	initialized := false
+	defer func() {
+		if !initialized {
+			if runner.hp != nil && runner.hp.Options.Dialer != nil {
+				runner.hp.Options.Dialer.Close()
+			}
+			if runner.hm != nil {
+				_ = runner.hm.Close()
+			}
+		}
+	}()
 	// 依次初始化各个组件
 	if err := runner.initStorage(); err != nil {
 		return nil, err
@@ -97,6 +114,7 @@ func New(options2 *options.Options) (*Runner, error) {
 		return nil, err
 	}
 
+	initialized = true
 	return runner, nil
 }
 
@@ -107,7 +125,7 @@ func (r *Runner) initFingerprints() error {
 	var err error
 	if r.Options.LoadRemote {
 		// 从远程加载
-		fps, err = utils.LoadRemoteFingerPrints(options2.FPTemplates)
+		fps, err = utils.LoadRemoteFingerPrintsContext(options2.Context, options2.FPTemplates)
 		if err != nil {
 			return err
 		}
@@ -148,7 +166,7 @@ func (r *Runner) initFingerprints() error {
 		}
 	}
 	if len(fps) == 0 {
-		gologger.Fatalf("没有指定指纹模板")
+		return fmt.Errorf("没有可用指纹模板")
 	}
 	r.fpEngine = preload.New(r.hp, fps)
 	//text := fmt.Sprintf("加载指纹库,数量:%d", len(fps)+len(preload.CollectedFpReqs()))
@@ -206,30 +224,18 @@ func (r *Runner) processTargetList(targetLines []string) error {
 // discoverPorts 对裸 IPv4 执行 nmap 端口发现,将发现的开放端口展开为 IP:端口 目标;
 // 裸 IP 本身保留(继续探测 80/443),与 Agent 深度扫描路径语义一致。
 func (r *Runner) discoverPorts(items []targetparser.Target, mode string) ([]targetparser.Target, error) {
-	ports := portscan.Ports(mode)
-	out := make([]targetparser.Target, 0, len(items))
-	for _, t := range items {
-		if t.Kind != targetparser.KindIPv4 {
-			out = append(out, t)
-			continue
-		}
-		gologger.Infof("端口发现(%s): %s", mode, t.Value)
-		scanResult, err := utils.NmapScan(t.Value, ports)
-		if err != nil {
-			return nil, fmt.Errorf("端口发现失败 %s: %v", t.Value, err)
-		}
-		out = append(out, t)
-		for _, host := range scanResult.Hosts {
-			for _, ported := range host.Ports.PortList {
-				if ported.State.State == "open" {
-					out = append(out, targetparser.Target{
-						Kind:  targetparser.KindIPv4Port,
-						Raw:   t.Value,
-						Value: fmt.Sprintf("%s:%d", host.Address.Addr, ported.PortID),
-					})
-				}
-			}
-		}
+	config, err := portscan.ConfigFromEnv()
+	if err != nil {
+		return nil, err
+	}
+	out, failures, err := portscan.Discover(r.Options.Context, items, mode, config, func(p portscan.DiscoveryProgress) {
+		gologger.Infof("端口发现进度: %d/%d", p.Completed, p.Total)
+	})
+	if err != nil {
+		return nil, err
+	}
+	if len(failures) > 0 {
+		return nil, fmt.Errorf("端口发现未完成: %d 个目标失败，首项 %s: %w", len(failures), failures[0].Target, failures[0].Err)
 	}
 	return out, nil
 }
@@ -315,6 +321,7 @@ func (r *Runner) initComponents() error {
 	if err != nil {
 		return err
 	}
+	hp.SetContext(r.Options.Context)
 	r.hp = hp
 	return nil
 }
@@ -461,66 +468,81 @@ func (r *Runner) callbackProcess(current, total int) {
 }
 
 // RunEnumeration 开始扫描所有目标
-func (r *Runner) RunEnumeration() {
-	// 检查是否有输入目标
-	if r.total == 0 {
-		gologger.Fatalf("没有指定输入，输入 -h 查看帮助")
-		return
-	}
-	r.callbackProcess(0, r.total)
+func (r *Runner) RunEnumeration() { _ = r.RunEnumerationContext(context.Background()) }
 
-	// 启动输出处理协程
+// RunEnumerationContext 将任务取消传入所有 HTTP、指纹和 favicon 请求，并回收扫描 worker。
+func (r *Runner) RunEnumerationContext(ctx context.Context) error {
+	if r.total == 0 {
+		return fmt.Errorf("没有指定扫描目标")
+	}
+	r.hp.SetContext(ctx)
+	r.callbackProcess(0, r.total)
 	outputWg := sizedwaitgroup.New(1)
 	outputWg.Add()
 	go r.handleOutput(&outputWg)
-
 	timeStart := time.Now()
-	wg := sizedwaitgroup.New(r.Options.RateLimit)
-	var numTarget uint64 = 0
-
+	limit := r.Options.RateLimit
+	if limit < 1 {
+		limit = 1
+	}
+	workers := make(chan struct{}, limit)
+	var wg sync.WaitGroup
+	var numTarget uint64
+	interval := time.Second / time.Duration(limit)
+	if interval < time.Nanosecond {
+		interval = time.Nanosecond
+	}
+	var next time.Time
 	r.hm.Scan(func(k, _ []byte) error {
-		wg.Add()
-		target := string(k)
-		if !strings.HasPrefix(target, "http") {
-			go func() {
-				defer wg.Done()
-				r.rateLimiter.Take()
-				err := r.runHostRequest(target)
-				if err != nil {
-					if r.Options.Callback != nil {
-						r.Options.Callback(CallbackErrorInfo{
-							Target: target,
-							Error:  err,
-						})
-					}
-				}
-				atomic.AddUint64(&numTarget, 1)
-				r.callbackProcess(int(atomic.LoadUint64(&numTarget)), r.total)
-			}()
-		} else {
-			go func() {
-				defer wg.Done()
-				r.rateLimiter.Take()
-				err := r.runDomainRequest(target)
-				if err != nil {
-					if r.Options.Callback != nil {
-						r.Options.Callback(CallbackErrorInfo{
-							Target: target,
-							Error:  err,
-						})
-					}
-				}
-				atomic.AddUint64(&numTarget, 1)
-				r.callbackProcess(int(atomic.LoadUint64(&numTarget)), r.total)
-			}()
+		if ctx.Err() != nil {
+			return ctx.Err()
 		}
+		if wait := time.Until(next); wait > 0 {
+			timer := time.NewTimer(wait)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return ctx.Err()
+			case <-timer.C:
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case workers <- struct{}{}:
+		}
+		if ctx.Err() != nil {
+			<-workers
+			return ctx.Err()
+		}
+		next = time.Now().Add(interval)
+		target := string(k)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer func() { <-workers }()
+			var requestErr error
+			if strings.HasPrefix(target, "http") {
+				requestErr = r.runDomainRequest(target)
+			} else {
+				requestErr = r.runHostRequest(target)
+			}
+			if requestErr != nil && r.Options.Callback != nil {
+				r.Options.Callback(CallbackErrorInfo{Target: target, Error: requestErr})
+			}
+			n := atomic.AddUint64(&numTarget, 1)
+			r.callbackProcess(int(n), r.total)
+		}()
 		return nil
 	})
 	wg.Wait()
 	close(r.result)
 	outputWg.Wait()
-	duration := time.Since(timeStart)
-	gologger.Infof("扫描完成～耗时:%s", utils.Duration2String(duration))
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	gologger.Infof("扫描完成～耗时:%s", utils.Duration2String(time.Since(timeStart)))
+	return nil
 }
 
 // handleOutput 处理扫描结果的输出
@@ -721,7 +743,7 @@ func (r *Runner) initVulnerabilityDB() error {
 	var err error
 	if r.Options.LoadRemote {
 		// load from hostname
-		err = engine.LoadFromHost(r.Options.AdvTemplates, r.Options.Language)
+		err = engine.LoadFromHostContext(r.Options.Context, r.Options.AdvTemplates, r.Options.Language)
 	} else {
 		// load from directory
 		vulDir := strings.TrimRight(r.Options.AdvTemplates, "/")
@@ -731,7 +753,7 @@ func (r *Runner) initVulnerabilityDB() error {
 		err = engine.LoadFromDirectory(vulDir)
 	}
 	if err != nil {
-		gologger.Fatalf("无法初始化漏洞库:%s", err)
+		return fmt.Errorf("无法初始化漏洞库: %w", err)
 	}
 	r.advEngine = engine
 	// Load vulnerability version database

@@ -53,6 +53,27 @@ info:
   title: AI-Infra-Guard 任务API
   version: "1.0"
 paths:
+  /api/v1/agents/status:
+    get:
+      summary: Read registered live Agent readiness
+      description: Read-only; does not start scans or resume disconnected tasks.
+      responses:
+        "200":
+          description: Connected count and live Agent identities
+          schema:
+            type: object
+            properties:
+              connected_count:
+                type: integer
+              agents:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    agent_id:
+                      type: string
+                    connected:
+                      type: boolean
   /api/v1/app/taskapi/result/{id}:
     get:
       description: Retrieve the final result of a completed task. Returns detailed

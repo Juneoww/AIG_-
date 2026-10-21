@@ -20,6 +20,7 @@
 package options
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"net/url"
@@ -29,6 +30,7 @@ import (
 
 // Options 定义了程序的所有配置选项
 type Options struct {
+	Context         context.Context   `json:"-"` // 任务取消，在初始化远程规则前即生效。
 	Target          multiStringFlag   // 目标URL列表
 	TargetFile      string            // 包含目标的文件路径
 	Output          string            // 输出文件路径
