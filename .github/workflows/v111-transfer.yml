@@ -1,0 +1,18 @@
+name: Assemble verified v1.1.1 offline asset
+on:
+  push:
+    branches: [delivery/v111-assets-20261021]
+permissions:
+  contents: write
+jobs:
+  assemble:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: 校验分段并重组同一份离线包，完成后清理本次临时分段
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/platform/assemble_release_asset.py

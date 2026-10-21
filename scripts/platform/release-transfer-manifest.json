@@ -1,0 +1,90 @@
+{
+  "repository": "Juneoww/AIG_-",
+  "tag": "v1.1.1",
+  "commit": "71271c9c6aa0f344d20197216a772482bb9c6599",
+  "filename": "AIG-platform-v1.1.1-linux-amd64.tar.gz",
+  "size": 1066735656,
+  "sha256": "db958dbd9082f837b5e6413df93d4cde350168078d32aa3746b5e8482e7a7a1b",
+  "parts": [
+    {
+      "name": "v111-offline-transfer-20261021-000.part",
+      "size": 67108864,
+      "sha256": "8bc41c2dc664568e05cc7a7f65274cb552a3fb4a6ccdf0eb3f20692af8cdf89f"
+    },
+    {
+      "name": "v111-offline-transfer-20261021-001.part",
+      "size": 67108864,
+      "sha256": "2e820c84b3933e1e0b9514cc26b9049da4b309896721b772fbaa44115c4605c9"
+    },
+    {
+      "name": "v111-offline-transfer-20261021-002.part",
+      "size": 67108864,
+      "sha256": "1ca47ff2bf4d848b64c7d1cd7bf26e5896fd5150ebb1739b62abcd2af0887112"
+    },
+    {
+      "name": "v111-offline-transfer-20261021-003.part",
+      "size": 67108864,
+      "sha256": "5bfdf20b2bbdc1872ee42da184072dd3c3465cab87ab7bae8e0db2a05b42a47b"
+    },
+    {
+      "name": "v111-offline-transfer-20261021-004.part",
+      "size": 67108864,
+      "sha256": "4eee57bf714a2cb22560d000bef8fd17370c8458f5cdf5d67fd70ac3256a3fc9"
+    },
+    {
+      "name": "v111-offline-transfer-20261021-005.part",
+      "size": 67108864,
+      "sha256": "d0238df63f24eb4f712233cd07f066f2351367c8a6a7ac7f72dae470d4a3fa2c"
+    },
+    {
+      "name": "v111-offline-transfer-20261021-006.part",
+      "size": 67108864,
+      "sha256": "35f70530fdf249b875dff04f5b2ac4f40ffa059ba030a06d7a1e4fce61a0900b"
+    },
+    {
+      "name": "v111-offline-transfer-20261021-007.part",
+      "size": 67108864,
+      "sha256": "8fd67413f81c2756aa628e8ab4cbd03f45c517999f70c0d5f8f457388c2e62f5"
+    },
+    {
+      "name": "v111-offline-transfer-20261021-008.part",
+      "size": 67108864,
+      "sha256": "f81182b923e8b4efe182b8177a6b23aa7aa40c776d86a1f6641d673b0f0c719d"
+    },
+    {
+      "name": "v111-offline-transfer-20261021-009.part",
+      "size": 67108864,
+      "sha256": "d4ddd42dcc04bf4c322cbb54fb500ffd8671e308a9252ba771acbce348a11777"
+    },
+    {
+      "name": "v111-offline-transfer-20261021-010.part",
+      "size": 67108864,
+      "sha256": "f715cb7ad5bb55b1a960e7f0e96561cf060988ba34fa30c7ff9c9c555fd8bcbe"
+    },
+    {
+      "name": "v111-offline-transfer-20261021-011.part",
+      "size": 67108864,
+      "sha256": "7f24165636ad1d9d4c01c620054f9c5140b0709d6b3643c7a5e92857b3fceeb7"
+    },
+    {
+      "name": "v111-offline-transfer-20261021-012.part",
+      "size": 67108864,
+      "sha256": "e92253ae21dcf6002ff5ad6400f8edc9337f413be06985bf596e86f4110d742a"
+    },
+    {
+      "name": "v111-offline-transfer-20261021-013.part",
+      "size": 67108864,
+      "sha256": "d0208deb84687c67f860be15444d96c54de0935265cd57d23857f0ddf9fb56e7"
+    },
+    {
+      "name": "v111-offline-transfer-20261021-014.part",
+      "size": 67108864,
+      "sha256": "112794fccc5d0b0e6e201ecb30f95c14d30bb8b80852609b678f7d78603ee8be"
+    },
+    {
+      "name": "v111-offline-transfer-20261021-015.part",
+      "size": 60102696,
+      "sha256": "845dae438752685fd32006da8a4659b1e623d2252829aa466b313da53d10bc13"
+    }
+  ]
+}
