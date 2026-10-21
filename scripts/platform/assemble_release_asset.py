@@ -31,14 +31,14 @@ def main():
     assert os.environ['GITHUB_REPOSITORY'] == repo and tag == 'v1.1.1'
     assert gh('api', 'repos/' + repo + '/commits/' + tag, '--jq', '.sha').decode().strip() == manifest['commit']
     names = {p['name'] for p in manifest['parts']}
-    assert len(names) == 16 and all(n.startswith('v111-offline-transfer-20261021-') and n.endswith('.part') for n in names)
-    deadline = time.monotonic() + 30 * 60
+    assert len(names) == 100 and all(n.startswith('v111-offline-transfer-20261021-') and n.endswith('.part') for n in names)
+    deadline = time.monotonic() + 45 * 60
     while True:
         release = json.loads(gh('release', 'view', tag, '--repo', repo, '--json', 'isDraft,assets,tagName'))
         assert release['isDraft'] and release['tagName'] == tag, 'Only owned draft is accepted'
         assets = {a['name']: a for a in release['assets'] if a['state'] == 'uploaded'}
         ready = len(names.intersection(assets))
-        print('Uploaded transfer segments: %d/16' % ready, flush=True)
+        print('Uploaded transfer segments: %d/%d' % (ready,len(names)), flush=True)
         if names.issubset(assets):
             break
         if time.monotonic() >= deadline:
