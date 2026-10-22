@@ -10,6 +10,7 @@ import hashlib
 import json
 from pathlib import Path, PurePosixPath
 import subprocess
+import sys
 import tarfile
 
 SCOPES = {'fingerprints', 'vuln', 'vuln_en'}
@@ -113,6 +114,10 @@ def main():
     parser.add_argument('--binaries', type=Path, required=True)
     parser.add_argument('--revision', required=True)
     args = parser.parse_args()
+    # 验证真正编进 Web 的页面，阻止正确源码搭配旧嵌入页面再次进入平台交付。
+    subprocess.run([sys.executable, str(Path(__file__).with_name('verify_embedded_frontend.py')),
+                    '--static', str(Path(__file__).parents[1] / 'common/websocket/static'),
+                    '--binary', str(args.binaries / 'ai-infra-guard')], check=True)
     import shutil
     for role, short in [('webserver', 'web'), ('agent', 'agent')]:
         image = 'ai-infra-guard-' + role + ':v1.1.0'

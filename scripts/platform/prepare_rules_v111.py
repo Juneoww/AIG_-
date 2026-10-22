@@ -33,7 +33,8 @@ def replace_one(text, old, new):
 
 def adapt_layout(text):
     text = replace_one(text, "WORKING_DIR = BASE + '/v1.1.0'", "WORKING_DIR = BASE + '/v1.1.1'")
-    text = replace_one(text, "('v1.1.0', '1.1.0')", "('v1.1.1', '1.1.1')")
+    # UI 补丁不改变规则引擎/业务目录；保留 v1.1.1 管理入口对已验证补丁镜像的支持。
+    text = replace_one(text, "('v1.1.0', '1.1.0')", "('v1.1.1', '1.1.1', 'v1.1.1-ui1')")
     return replace_one(text, '契约 1.0 仅支持程序基线 v1.1.0', '契约 1.0 此管理入口仅支持程序基线 v1.1.1')
 
 

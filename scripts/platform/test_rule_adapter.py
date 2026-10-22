@@ -10,6 +10,15 @@ spec.loader.exec_module(adapter)
 
 
 class AdapterTest(unittest.TestCase):
+    def test_ui_patch_tag_is_accepted_without_accepting_other_platforms(self):
+        layout = "WORKING_DIR = BASE + '/v1.1.0'\ndef accepts(tag):\n    return tag in ('v1.1.0', '1.1.0')\nMESSAGE = '契约 1.0 仅支持程序基线 v1.1.0'\n"
+        namespace = {'BASE': '/opt/aig'}
+        exec(adapter.adapt_layout(layout), namespace)
+        self.assertTrue(namespace['accepts']('v1.1.1-ui1'))
+        self.assertTrue(namespace['accepts']('v1.1.1'))
+        self.assertFalse(namespace['accepts']('v1.1.0'))
+        self.assertFalse(namespace['accepts']('v1.1.2'))
+
     def test_unknown_delivery_rejected_before_output(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -23,7 +32,7 @@ class AdapterTest(unittest.TestCase):
         layout = "WORKING_DIR = BASE + '/v1.1.0'\n('v1.1.0', '1.1.0')\n契约 1.0 仅支持程序基线 v1.1.0"
         updated = adapter.adapt_layout(layout)
         self.assertIn("BASE + '/v1.1.1'", updated)
-        self.assertIn("('v1.1.1', '1.1.1')", updated)
+        self.assertIn("('v1.1.1', '1.1.1', 'v1.1.1-ui1')", updated)
         with self.assertRaises(ValueError):
             adapter.adapt_layout(layout + "\nWORKING_DIR = BASE + '/v1.1.0'")
 
