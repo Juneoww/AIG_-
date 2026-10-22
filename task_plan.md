@@ -9,7 +9,7 @@
 - [x] Web 补丁安装器：固定源/目标身份，完整布局/空闲只读预检，维护入口与同规则互斥锁、Web冷备份和Checker只读备份、仅 Web 重建、验收、失败恢复、主动回滚。
 - [x] 构建正确 Web 二进制/纯平台补丁镜像；新层仅含 Web 二进制，Agent 镜像不变。
 - [x] 单元测试、真实页面交互和实际请求参数、全端口范围回归、隔离 Docker 升级/失败恢复/回滚演练；独立复审。
-- [ ] 生成配套脚本和 Web 离线包、操作说明、摘要，提交并推送补丁分支；保留原 v1.1.1 标签与历史包。
+- [x] 生成配套脚本和 Web 离线包、操作说明、摘要，提交并推送补丁分支；保留原 v1.1.1 标签与历史包。
 
 交付固定名：deploy-web-ui-v1.1.1-ui1.sh、AIG-web-ui-v1.1.1-ui1-linux-amd64.tar.gz。
 镜像：ai-infra-guard-webserver:v1.1.1-ui1。源 Web ID adeef221d46780cae1fab812a6c65ad8e41ce873e2b256570a0cb341052efac6，源 Agent ID 4243bdc214fba86533fa2036b2de851d9697c0bcd5aeb73660341b2e25e4db4f。
