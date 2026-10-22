@@ -30,7 +30,8 @@ class EmbeddedFrontendTests(unittest.TestCase):
 
     def test_accepts_real_entry_and_embedded_bytes(self):
         binary = self.root / "web"
-        binary.write_bytes(b"prefix" + self.index.read_bytes() + self.script.read_bytes())
+        binary.write_bytes(b"prefix" + self.index.read_bytes() + self.script.read_bytes()
+                           + (self.root / "assets/main.css").read_bytes())
         result = verify(self.root, binary)
         self.assertEqual(result["entry_scripts"], ["assets/main.js"])
 
@@ -43,6 +44,12 @@ class EmbeddedFrontendTests(unittest.TestCase):
         (self.root / "assets/main.css").unlink()
         with self.assertRaisesRegex(VerificationError, "missing.*main.css"):
             verify(self.root)
+
+    def test_binary_must_embed_referenced_stylesheet(self):
+        binary = self.root / "web"
+        binary.write_bytes(self.index.read_bytes() + self.script.read_bytes())
+        with self.assertRaisesRegex(VerificationError, "binary.*main.css"):
+            verify(self.root, binary)
 
     def test_unreferenced_new_bundle_cannot_mask_old_entry(self):
         (self.root / "assets/new.js").write_text(self.bundle, encoding="utf-8")

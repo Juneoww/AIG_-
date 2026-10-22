@@ -1,6 +1,6 @@
 """功能：发布前验证实际入口资源包含一期端口选项和请求参数，并可核对 Go 二进制。
 实现：解析 index.html 的本地资源及入口 JS 依赖，检查构建后的 radio 控件与
-  port_mode 赋值；可选逐字节核对 index 和这些 JS 已嵌入指定二进制。
+  port_mode 赋值；可选逐字节核对 index、JS 和入口引用资源已嵌入指定二进制。
 输入：--static 静态目录（默认 common/websocket/static），--binary 可选二进制。
 输出：JSON 验收摘要；失败返回非零。仅读取文件，不构建、不启动服务、不执行扫描。
 依赖：Python 3 标准库。用法：python scripts/verify_embedded_frontend.py --binary ./web
@@ -60,8 +60,7 @@ def verify(static_dir, binary=None):
     parser.feed(index.read_text(encoding="utf-8"))
     if not parser.scripts:
         raise VerificationError("index has no module entry script")
-    for reference in parser.resources:
-        resolve_resource(root, reference)
+    resources = [resolve_resource(root, reference) for reference in parser.resources]
     entries = [resolve_resource(root, src) for src in parser.scripts]
     javascript = {}
     pending = list(entries)
@@ -92,7 +91,7 @@ def verify(static_dir, binary=None):
         if not binary.is_file() or binary.stat().st_size == 0:
             raise VerificationError(f"missing or empty binary: {binary}")
         with binary.open("rb") as stream, mmap.mmap(stream.fileno(), 0, access=mmap.ACCESS_READ) as data:
-            for resource in (index, *javascript):
+            for resource in dict.fromkeys((index, *javascript, *resources)):
                 if data.find(resource.read_bytes()) < 0:
                     raise VerificationError(f"binary does not embed current resource: {resource.relative_to(root).as_posix()}")
     return {
