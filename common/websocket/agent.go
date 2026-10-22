@@ -20,7 +20,11 @@ package websocket
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net"
+	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -72,7 +76,13 @@ type AgentConnection struct {
 	stateMu sync.RWMutex // 保护连接状态（agentID, isActive）
 	writeMu sync.Mutex   // 保护写操作（发送消息）
 
-	isActive bool
+	isActive         bool
+	lifecycleMu      sync.Mutex // 分配与失联清理互斥，不阻塞 socket 读循环。
+	ownedTasks       map[string]struct{}
+	stopOnce         sync.Once
+	done             chan struct{}
+	failureReason    string
+	eventsIncomplete bool
 }
 
 // AgentManager 管理所有agent连接
@@ -157,7 +167,9 @@ func NewAgentConnection(conn *websocket.Conn) *AgentConnection {
 	return &AgentConnection{
 		conn: conn,
 		// store:    store,
-		isActive: true,
+		isActive:   true,
+		ownedTasks: make(map[string]struct{}),
+		done:       make(chan struct{}),
 	}
 }
 
@@ -178,78 +190,89 @@ func (am *AgentManager) HandleAgentWebSocket() gin.HandlerFunc {
 	}
 }
 
-// handleConnection 处理单个连接的消息
+// handleConnection 持续读取控制帧，业务消息交给单消费者顺序处理。
 func (ac *AgentConnection) handleConnection(am *AgentManager) {
-	defer func() {
-		ac.stateMu.RLock()
-		agentID := ac.agentID
-		remoteAddr := ac.conn.RemoteAddr().String()
-		ac.stateMu.RUnlock()
-		ac.cleanup(am)
-		log.Infof("Agent连接处理结束: agentId=%s, remoteAddr=%s", agentID, remoteAddr)
+	const queueCapacity = 256
+	const queueBytesLimit = 16 * 1024 * 1024
+	type pendingMessage struct{ data []byte }
+	queue := make(chan pendingMessage, queueCapacity)
+	var pendingBytes int64
+	var pendingMu sync.Mutex
+	consumerDone := make(chan struct{})
+	go func() {
+		defer close(consumerDone)
+		for message := range queue {
+			ac.processMessage(am, message.data)
+			pendingMu.Lock()
+			pendingBytes -= int64(len(message.data))
+			pendingMu.Unlock()
+		}
 	}()
-
-	// 设置连接参数
+	defer func() {
+		ac.stop("Agent connection disconnected; scan incomplete, start a new scan to retry")
+		close(queue)
+		<-consumerDone // 已接受事件先完成持久化，再记录连接失败，保持历史顺序。
+		ac.cleanup(am)
+	}()
 	ac.conn.SetReadLimit(maxMessageSize)
-	ac.conn.SetPongHandler(func(string) error {
-		ac.conn.SetReadDeadline(time.Now().Add(pongWait))
-		return nil
+	ac.conn.SetReadDeadline(time.Now().Add(pongWait))
+	ac.conn.SetPongHandler(func(string) error { return ac.conn.SetReadDeadline(time.Now().Add(pongWait)) })
+	ac.conn.SetPingHandler(func(data string) error { return ac.writeControl(websocket.PongMessage, []byte(data)) })
+	ac.conn.SetCloseHandler(func(code int, text string) error {
+		return ac.writeControl(websocket.CloseMessage, websocket.FormatCloseMessage(code, ""))
 	})
-
-	// 启动心跳检测
 	go ac.writePump()
-
-	// 处理消息
 	for {
 		_, message, err := ac.conn.ReadMessage()
 		if err != nil {
-			ac.stateMu.RLock()
-			agentID := ac.agentID
-			ac.stateMu.RUnlock()
-
-			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				log.Errorf("Agent连接异常断开: agentId=%s, error=%v", agentID, err)
+			var netErr net.Error
+			if errors.As(err, &netErr) && netErr.Timeout() {
+				log.Warnf("Agent读取心跳超时: agentId=%s, error=%v", ac.id(), err)
+			} else if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
+				log.Infof("Agent连接关闭: agentId=%s", ac.id())
 			} else {
-				log.Infof("Agent连接正常断开: agentId=%s, closeCode=%v", agentID, err)
+				log.Warnf("Agent连接中断: agentId=%s, error=%v", ac.id(), err)
 			}
-			break
+			return
 		}
-
-		var wsMsg WSMessage
-		if err := json.Unmarshal(message, &wsMsg); err != nil {
-			log.Errorf("Agent消息解析失败: agentId=%s, error=%v", ac.agentID, err)
-			// 发送错误响应但不断开连接
-			ac.sendError("消息格式错误请检查JSON格式")
-			continue
+		pendingMu.Lock()
+		fits := pendingBytes+int64(len(message)) <= queueBytesLimit
+		if fits {
+			pendingBytes += int64(len(message))
 		}
-
-		// 验证消息类型
-		if wsMsg.Type == "" {
-			log.Errorf("Agent消息类型为空: agentId=%s", ac.agentID)
-			ac.sendError("消息类型不能为空")
-			continue
-		}
-
-		switch wsMsg.Type {
-		case WSMsgTypeRegister:
-			ac.handleRegister(am, wsMsg.Content)
-		case WSMsgTypeDisconnect:
-			// 只有在身份验证成功时才断开连接
-			ac.handleDisconnect(am, wsMsg.Content)
-			// 检查连接是否仍然活跃，如果不活跃则退出
-			ac.stateMu.RLock()
-			if !ac.isActive {
-				ac.stateMu.RUnlock()
-				return
+		pendingMu.Unlock()
+		if fits {
+			select {
+			case queue <- pendingMessage{message}:
+				continue
+			default:
 			}
-			ac.stateMu.RUnlock()
-		case WSMsgTypeLiveStatus, WSMsgTypePlanUpdate, WSMsgTypeNewPlanStep, WSMsgTypeStatusUpdate, WSMsgTypeToolUsed, WSMsgTypeResultUpdate, WSMsgTypeActionLog, WSMsgTypeError:
-			// 所有事件类型都统一处理
-			ac.handleAgentEvent(am, wsMsg.Content, wsMsg.Type)
-		default:
-			log.Warnf("Agent发送未知消息类型: agentId=%s, type=%s", ac.agentID, wsMsg.Type)
-			ac.sendError(fmt.Sprintf("未知的消息类型: %s。支持的类型: register, disconnect, liveStatus, planUpdate, newPlanStep, statusUpdate, toolUsed, resultUpdate, actionLog", wsMsg.Type))
 		}
+		// 队列溢出意味着未接收的消息无法保证完整性；显式失败，禁止静默丢弃后继续成功。
+		ac.stateMu.Lock()
+		ac.eventsIncomplete = true
+		ac.stateMu.Unlock()
+		ac.stop("Agent event queue overflow; scan incomplete, persisted events retained; start a new scan to retry")
+		log.Errorf("Agent事件队列溢出，关闭连接并保留已存事件: agentId=%s", ac.id())
+		return
+	}
+}
+
+func (ac *AgentConnection) processMessage(am *AgentManager, message []byte) {
+	var wsMsg WSMessage
+	if err := json.Unmarshal(message, &wsMsg); err != nil {
+		ac.sendError("消息格式错误请检查JSON格式")
+		return
+	}
+	switch wsMsg.Type {
+	case WSMsgTypeRegister:
+		ac.handleRegister(am, wsMsg.Content)
+	case WSMsgTypeDisconnect:
+		ac.handleDisconnect(am, wsMsg.Content)
+	case WSMsgTypeLiveStatus, WSMsgTypePlanUpdate, WSMsgTypeNewPlanStep, WSMsgTypeStatusUpdate, WSMsgTypeToolUsed, WSMsgTypeResultUpdate, WSMsgTypeActionLog, WSMsgTypeError:
+		ac.handleAgentEvent(am, wsMsg.Content, wsMsg.Type)
+	default:
+		ac.sendError(fmt.Sprintf("未知的消息类型: %s", wsMsg.Type))
 	}
 }
 
@@ -271,31 +294,31 @@ func (ac *AgentConnection) handleRegister(am *AgentManager, content interface{})
 		return
 	}
 
-	// 检查是否已存在相同ID的Agent
-	am.mu.Lock()
-	if existingConn, exists := am.connections[rc.AgentID]; exists {
-		am.mu.Unlock()
-		log.Warnf("Agent ID已存在，断开旧连接: agentId=%s", rc.AgentID)
-		// 断开旧连接
-		existingConn.stateMu.Lock()
-		existingConn.isActive = false
-		existingConn.stateMu.Unlock()
-		existingConn.conn.Close()
-	} else {
-		am.mu.Unlock()
+	ac.lifecycleMu.Lock()
+	select {
+	case <-ac.done:
+		ac.lifecycleMu.Unlock()
+		return
+	default:
 	}
-
-	// 注册新连接
+	ac.stateMu.Lock()
+	if ac.agentID != "" && ac.agentID != rc.AgentID {
+		ac.stateMu.Unlock()
+		ac.lifecycleMu.Unlock()
+		ac.sendError("连接不能更改Agent ID")
+		return
+	}
+	ac.agentID = rc.AgentID
+	ac.stateMu.Unlock()
+	// 指针交换在同一临界区完成；旧连接 cleanup 只能移除自身。
 	am.mu.Lock()
+	existingConn := am.connections[rc.AgentID]
 	am.connections[rc.AgentID] = ac
 	am.mu.Unlock()
-
-	// 更新连接状态
-	ac.stateMu.Lock()
-	ac.agentID = rc.AgentID
-	ac.isActive = true
-	ac.stateMu.Unlock()
-
+	ac.lifecycleMu.Unlock()
+	if existingConn != nil && existingConn != ac {
+		existingConn.stop("Agent connection replaced; previous scan interrupted, persisted events retained")
+	}
 	log.Infof("Agent注册成功: agentId=%s, hostname=%s, ip=%s, version=%s", rc.AgentID, rc.Hostname, rc.IP, rc.Version)
 	// 发送注册成功响应
 	response := WSMessage{
@@ -305,7 +328,7 @@ func (ac *AgentConnection) handleRegister(am *AgentManager, content interface{})
 			Message: "注册成功",
 		},
 	}
-	ac.conn.WriteJSON(response)
+	ac.writeJSON(response)
 }
 
 // handleDisconnect 处理主动断开连接
@@ -334,11 +357,6 @@ func (ac *AgentConnection) handleDisconnect(am *AgentManager, content interface{
 		return
 	}
 
-	// 从连接管理器中移除
-	am.mu.Lock()
-	delete(am.connections, agentID)
-	am.mu.Unlock()
-
 	// 发送断开确认
 	response := WSMessage{
 		Type: "disconnect_ack",
@@ -347,108 +365,84 @@ func (ac *AgentConnection) handleDisconnect(am *AgentManager, content interface{
 			Message: "断开连接成功",
 		},
 	}
-	ac.conn.WriteJSON(response)
+	ac.writeJSON(response)
 
-	// 标记连接为非活跃
-	ac.stateMu.Lock()
-	ac.isActive = false
-	ac.stateMu.Unlock()
+	ac.stop("Agent requested disconnect; scan incomplete, persisted events retained")
 }
 
-// writePump 发送心跳包
+// writePump 的生命周期随连接立即终止；全部写操作共享 writeMu。
 func (ac *AgentConnection) writePump() {
 	ticker := time.NewTicker(pingPeriod)
-	defer func() {
-		ticker.Stop()
-		log.Infof("Agent心跳检测已停止: agentId=%s", ac.agentID)
-	}()
-
-	log.Infof("Agent心跳检测已启动: agentId=%s, pingPeriod=%v", ac.agentID, pingPeriod)
-
-	for range ticker.C {
-		ac.stateMu.RLock()
-		if !ac.isActive {
-			ac.stateMu.RUnlock()
-			log.Infof("Agent连接已标记为非活跃,停止心跳检测: agentId=%s", ac.agentID)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ac.done:
 			return
-		}
-		agentID := ac.agentID
-		ac.stateMu.RUnlock()
-
-		// 设置写超时
-		ac.conn.SetWriteDeadline(time.Now().Add(writeWait))
-
-		// 尝试发送ping消息
-		err := ac.conn.WriteMessage(websocket.PingMessage, nil)
-		if err != nil {
-			log.Warnf("Agent心跳发送失败,准备重试: agentId=%s, error=%v", agentID, err)
-
-			// 尝试重试一次
-			time.Sleep(1 * time.Second)
-			ac.stateMu.RLock()
-			if !ac.isActive {
-				ac.stateMu.RUnlock()
-				log.Infof("Agent连接在重试期间已标记为非活跃: agentId=%s", agentID)
+		case <-ticker.C:
+			if err := ac.writeControl(websocket.PingMessage, nil); err != nil {
+				ac.stop("Agent heartbeat write failed; scan incomplete")
 				return
 			}
-			ac.stateMu.RUnlock()
-
-			ac.conn.SetWriteDeadline(time.Now().Add(writeWait))
-			err = ac.conn.WriteMessage(websocket.PingMessage, nil)
-			if err != nil {
-				log.Errorf("Agent心跳重试失败,连接已失效: agentId=%s, error=%v", agentID, err)
-
-				// 标记连接为非活跃
-				ac.stateMu.Lock()
-				ac.isActive = false
-				ac.stateMu.Unlock()
-
-				log.Errorf("Agent连接已标记为失效: agentId=%s, 原因=心跳失败", agentID)
-				return
-			} else {
-				log.Infof("Agent心跳重试成功: agentId=%s", agentID)
-			}
-		} else {
-			log.Debugf("Agent心跳发送成功: agentId=%s", agentID)
 		}
 	}
 }
 
-// cleanup 清理连接
-func (ac *AgentConnection) cleanup(am *AgentManager) {
-	ac.stateMu.Lock()
-	agentID := ac.agentID
-	wasActive := ac.isActive
-	ac.isActive = false
-	ac.stateMu.Unlock()
+func (ac *AgentConnection) id() string {
+	ac.stateMu.RLock()
+	defer ac.stateMu.RUnlock()
+	return ac.agentID
+}
 
-	log.Infof("开始清理Agent连接: agentId=%s, wasActive=%v", agentID, wasActive)
+func (ac *AgentConnection) writeJSON(message interface{}) error {
+	ac.writeMu.Lock()
+	defer ac.writeMu.Unlock()
+	if err := ac.conn.SetWriteDeadline(time.Now().Add(writeWait)); err != nil {
+		return err
+	}
+	return ac.conn.WriteJSON(message)
+}
 
-	if agentID != "" {
-		am.mu.Lock()
-		// 检查是否真的存在于连接管理器中
-		if _, exists := am.connections[agentID]; exists {
-			delete(am.connections, agentID)
-			log.Infof("Agent已从连接管理器中移除: agentId=%s", agentID)
-		} else {
-			log.Warnf("Agent不在连接管理器中，可能已被移除: agentId=%s", agentID)
+func (ac *AgentConnection) writeControl(kind int, data []byte) error {
+	ac.writeMu.Lock()
+	defer ac.writeMu.Unlock()
+	return ac.conn.WriteControl(kind, data, time.Now().Add(writeWait))
+}
+
+// stop 先禁止新任务分配，再关闭 socket 唤醒阻塞读取；重复调用保留首次故障原因。
+func (ac *AgentConnection) stop(reason string) {
+	ac.lifecycleMu.Lock()
+	defer ac.lifecycleMu.Unlock()
+	ac.stopOnce.Do(func() {
+		ac.stateMu.Lock()
+		ac.isActive = false
+		ac.failureReason = reason
+		ac.stateMu.Unlock()
+		close(ac.done)
+		if ac.conn != nil {
+			ac.conn.Close()
 		}
-		am.mu.Unlock()
+	})
+}
 
-		// ac.store.UpdateOnlineStatus(ac.agentID, false)
-	} else {
-		log.Warnf("清理未注册的Agent连接: remoteAddr=%s", ac.conn.RemoteAddr().String())
+// cleanup 仅清理此连接分配的任务，不按可复用的 AgentID 扫描全库。
+func (ac *AgentConnection) cleanup(am *AgentManager) {
+	ac.stop("Agent connection disconnected; scan incomplete, persisted events retained")
+	agentID := ac.id()
+	am.mu.Lock()
+	if am.connections[agentID] == ac {
+		delete(am.connections, agentID)
 	}
-
-	// 关闭WebSocket连接
-	err := ac.conn.Close()
-	if err != nil {
-		log.Warnf("关闭Agent连接时出错: agentId=%s, error=%v", agentID, err)
-	} else {
-		log.Infof("Agent连接已关闭: agentId=%s", agentID)
+	tm := am.taskManager
+	am.mu.Unlock()
+	ac.lifecycleMu.Lock()
+	defer ac.lifecycleMu.Unlock()
+	if tm == nil {
+		return
 	}
-
-	log.Infof("Agent连接清理完成: agentId=%s", agentID)
+	for sessionID := range ac.ownedTasks {
+		tm.failDisconnectedTask(sessionID, ac)
+		delete(ac.ownedTasks, sessionID)
+	}
 }
 
 // sendError 发送错误响应
@@ -461,15 +455,8 @@ func (ac *AgentConnection) sendError(message string) {
 		},
 	}
 
-	// 设置写超时
-	ac.conn.SetWriteDeadline(time.Now().Add(writeWait))
-
-	err := ac.conn.WriteJSON(response)
-	if err != nil {
-		// 如果发送错误响应都失败，说明连接可能有问题
-		ac.stateMu.Lock()
-		ac.isActive = false
-		ac.stateMu.Unlock()
+	if err := ac.writeJSON(response); err != nil {
+		ac.stop("Agent write failed; scan incomplete")
 	}
 }
 
@@ -503,10 +490,39 @@ func (ac *AgentConnection) handleAgentEvent(am *AgentManager, content interface{
 
 	log.Debugf("收到Agent事件: agentId=%s, sessionId=%s, eventType=%s", ac.agentID, sessionId, eventType)
 
-	// 转发给 TaskManager 处理
+	ac.lifecycleMu.Lock()
+	_, owned := ac.ownedTasks[sessionId]
+	ac.lifecycleMu.Unlock()
+	if !owned {
+		log.Warnf("忽略非该连接任务的事件: agentId=%s, sessionId=%s", ac.id(), sessionId)
+		return
+	}
 	am.mu.RLock()
-	am.taskManager.HandleAgentEvent(sessionId, eventType, event)
+	tm := am.taskManager
 	am.mu.RUnlock()
+	if tm != nil {
+		ownership := tm.ownerFor(sessionId)
+		ownership.mu.Lock()
+		if ownership.connection != ac {
+			ownership.mu.Unlock()
+			return
+		}
+		ac.stateMu.RLock()
+		incomplete := ac.eventsIncomplete
+		ac.stateMu.RUnlock()
+		var err error
+		if incomplete && eventType == WSMsgTypeResultUpdate {
+			// 溢出前排队的报告仍保存为证据，但不能把不完整的事件流标为成功。
+			err = tm.handleEvent(sessionId, eventType, event)
+		} else {
+			err = tm.HandleAgentEvent(sessionId, eventType, event)
+		}
+		ownership.mu.Unlock()
+		if err != nil {
+			log.Errorf("Agent事件处理失败: sessionId=%s, error=%v", sessionId, err)
+			ac.stop("Agent event persistence failed; scan incomplete, persisted events retained")
+		}
+	}
 }
 
 // 添加获取可用 Agent 的方法
@@ -530,4 +546,20 @@ func (am *AgentManager) SetTaskManager(taskManager *TaskManager) {
 	am.mu.Lock()
 	defer am.mu.Unlock()
 	am.taskManager = taskManager
+}
+
+// StatusHandler 提供部署验收需要的已注册连接状态，不包含任务或鉴权信息。
+func (am *AgentManager) StatusHandler() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		type agentStatus struct {
+			AgentID   string `json:"agent_id"`
+			Connected bool   `json:"connected"`
+		}
+		agents := make([]agentStatus, 0)
+		for _, ac := range am.GetAvailableAgents() {
+			agents = append(agents, agentStatus{ac.id(), true})
+		}
+		sort.Slice(agents, func(i, j int) bool { return agents[i].AgentID < agents[j].AgentID })
+		c.JSON(http.StatusOK, gin.H{"connected_count": len(agents), "agents": agents})
+	}
 }

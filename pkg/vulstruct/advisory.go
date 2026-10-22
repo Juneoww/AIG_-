@@ -20,6 +20,7 @@
 package vulstruct
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strings"
@@ -72,7 +73,11 @@ func (ae *AdvisoryEngine) LoadFromDirectory(dir string) error {
 }
 
 func (ae *AdvisoryEngine) LoadFromHost(host string, lang string) error {
-	datas, err := utils.LoadRemoteVulStruct(fmt.Sprintf("http://%s/api/v1/knowledge/vulnerabilities?page=1&size=9999&lang=%s", host, lang))
+	return ae.LoadFromHostContext(context.Background(), host, lang)
+}
+
+func (ae *AdvisoryEngine) LoadFromHostContext(ctx context.Context, host string, lang string) error {
+	datas, err := utils.LoadRemoteVulStructContext(ctx, fmt.Sprintf("http://%s/api/v1/knowledge/vulnerabilities?page=1&size=9999&lang=%s", host, lang))
 	if err != nil {
 		return err
 	}

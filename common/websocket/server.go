@@ -111,10 +111,6 @@ func RunWebServer(options *version.Options) {
 	sseManager := NewSSEManager()
 
 	taskManager := NewTaskManager(agentManager, taskStore, modelStore, fileConfig, sseManager)
-	err = taskManager.taskStore.ResetRunningTasks()
-	if err != nil {
-		log.Fatalf("重置运行中的任务失败: %v", err)
-	}
 
 	// 将 TaskManager 注入到 AgentManager
 	agentManager.SetTaskManager(taskManager)
@@ -277,6 +273,7 @@ func RunWebServer(options *version.Options) {
 		{
 			// 只需要WebSocket入口
 			agents.GET("/ws", agentManager.HandleAgentWebSocket())
+			agents.GET("/status", agentManager.StatusHandler())
 		}
 		// 提供给第三方的api
 		taskApi := appSecurity.Group("/taskapi")

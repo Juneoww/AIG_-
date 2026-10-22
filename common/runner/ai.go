@@ -23,10 +23,10 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/Tencent/AI-Infra-Guard/common/utils/chromium"
 	"github.com/Tencent/AI-Infra-Guard/common/utils/models"
-	"github.com/Tencent/AI-Infra-Guard/internal/gologger"
 	"github.com/Tencent/AI-Infra-Guard/pkg/vulstruct"
 )
 
@@ -105,52 +105,66 @@ func LoadWebPageScreenShotSummary(language string) string {
 	return prompt
 }
 
+// ScreenShot 保留旧接口，并给浏览器全生命周期设置保守截止。
 func ScreenShot(url string) ([]byte, error) {
-	instance, err := chromium.NewWebScreenShotWithOptions()
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	return ScreenShotContext(ctx, url)
+}
+
+func ScreenShotContext(ctx context.Context, url string) ([]byte, error) {
+	instance, err := chromium.NewWebScreenShotWithContext(ctx)
 	if err != nil {
-		gologger.WithError(err).Errorf("new screenshot instance error: %s", err)
 		return nil, err
 	}
 	defer instance.Close()
-	shotData, err := instance.Screen(url)
+	data, err := instance.ScreenWithContext(ctx, url)
 	if err != nil {
-		gologger.WithError(err).Errorf("get screenshot error: %s", err)
 		return nil, err
 	}
-	if len(shotData) == 0 {
+	if len(data) == 0 {
 		return nil, errors.New("截图失败")
 	}
-	return shotData, nil
+	return data, nil
 }
 
-func Analysis(url string, resp string, language string, model *models.OpenAI) ([]byte, *vulstruct.Info, string, error) {
-	var shotData []byte
-	shotData, err := ScreenShot(url)
+func Analysis(url, resp, language string, model *models.OpenAI) ([]byte, *vulstruct.Info, string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 420*time.Second)
+	defer cancel()
+	return AnalysisContext(ctx, url, resp, language, model)
+}
+
+func AnalysisContext(ctx context.Context, url, resp, language string, model *models.OpenAI) ([]byte, *vulstruct.Info, string, error) {
+	data, err := ScreenShotContext(ctx, url)
 	if err != nil {
-		gologger.WithError(err).Errorf("screenshot error: %s", err)
 		return nil, nil, "", err
 	}
-	summary, err := model.ChatWithImageByte(context.Background(), LoadWebPageScreenShotSummary(language), shotData)
+	info, summary, err := AnalysisImageContext(ctx, url, resp, language, model, data)
+	return data, info, summary, err
+}
+
+// AnalysisImageContext 复用已取得的截图；AI 失败不丢失截图与基础漏洞。
+func AnalysisImageContext(ctx context.Context, url, resp, language string, model *models.OpenAI, data []byte) (*vulstruct.Info, string, error) {
+	summary, err := model.ChatWithImageByte(ctx, LoadWebPageScreenShotSummary(language), data)
 	if err != nil {
-		gologger.WithError(err).Errorf("chat with image byte error: %s", err)
-		return shotData, nil, "", err
+		return nil, "", err
 	}
-	// 敏感信息分析
-	sensitive := LoadSensitivePrompt(language)
-	sensitive = strings.ReplaceAll(sensitive, "{{url}}", url)
+	sensitive := strings.ReplaceAll(LoadSensitivePrompt(language), "{{url}}", url)
 	sensitive = strings.ReplaceAll(sensitive, "{{html}}", resp)
 	sensitive = strings.ReplaceAll(sensitive, "{{screenshot_summary}}", summary)
-	ret := ""
-	for word := range model.ChatStream(context.Background(), []map[string]string{{"role": "user", "content": sensitive}}) {
-		ret += word
+	ret, err := model.ChatResponse(ctx, sensitive)
+	if err != nil {
+		return nil, "", err
 	}
-	gologger.Infof("敏感信息分析: %s", ret)
-	info := vulstruct.Info{}
-	info.Details = extractTag(ret, "details")
-	info.Severity = extractTag(ret, "severity")
-	info.Summary = extractTag(ret, "title")
-	x := extractTag(ret, "summary")
-	return shotData, &info, x, nil
+	if err = ctx.Err(); err != nil {
+		return nil, "", err
+	}
+	severity := extractTag(ret, "severity")
+	if severity != "low" && severity != "medium" && severity != "high" {
+		return nil, "", errors.New("AI analysis returned incomplete severity")
+	}
+	info := &vulstruct.Info{Details: extractTag(ret, "details"), Severity: severity, Summary: extractTag(ret, "title")}
+	return info, extractTag(ret, "summary"), nil
 }
 
 func extractTag(text, tag string) string {

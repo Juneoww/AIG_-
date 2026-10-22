@@ -26,8 +26,8 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
-	"errors"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -445,27 +445,25 @@ func writeFile(path string, r io.Reader, mode int64) error {
 
 // GitClone 克隆Git仓库
 func GitClone(repoURL, targetDir string, timeout time.Duration) error {
+	return GitCloneContext(context.Background(), repoURL, targetDir, timeout)
+}
+
+// GitCloneContext 让任务取消终止并回收 clone 进程，取消后不再重试。
+func GitCloneContext(parent context.Context, repoURL, targetDir string, timeout time.Duration) error {
 	var err error
 	for i := 0; i < 3; i++ {
-		err = func() error {
-			ctx := context.Background()
-			ctx, cancel := context.WithTimeout(ctx, timeout)
-			defer cancel()
-			cmd := exec.CommandContext(ctx, "git", "clone", "--", repoURL, targetDir)
-			done := make(chan error)
-			go func() {
-				_, err := cmd.CombinedOutput()
-				done <- err
-			}()
-
-			select {
-			case <-ctx.Done():
-				_ = cmd.Process.Kill()
-				return fmt.Errorf("操作超时")
-			case err = <-done:
-				return err
-			}
-		}()
+		if parent.Err() != nil {
+			return parent.Err()
+		}
+		ctx, cancel := context.WithTimeout(parent, timeout)
+		cmd := exec.CommandContext(ctx, "git", "clone", "--", repoURL, targetDir)
+		cmd.WaitDelay = 3 * time.Second
+		_, err = cmd.CombinedOutput()
+		contextErr := ctx.Err()
+		cancel()
+		if contextErr != nil {
+			return contextErr
+		}
 		if err == nil {
 			return nil
 		}

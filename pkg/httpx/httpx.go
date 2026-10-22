@@ -20,6 +20,7 @@
 package httpx
 
 import (
+	"context"
 	"crypto/tls"
 	"io/ioutil"
 	"net/http"
@@ -39,7 +40,12 @@ type HTTPX struct {
 	client2       *http.Client
 	CustomHeaders map[string]string
 	Options       *HTTPOptions
+	context       context.Context
 }
+
+// SetContext 在启动扫描 worker 前绑定任务 context，使指纹和 favicon 请求也能取消。
+// 同一 HTTPX 的活动请求期间不得更改；Runner 为每个任务创建独立客户端。
+func (h *HTTPX) SetContext(ctx context.Context) { h.context = ctx }
 
 // NewHttpx instance
 func NewHttpx(options *HTTPOptions) (*HTTPX, error) {
@@ -187,6 +193,9 @@ func (h *HTTPX) newRequest(method, targetURL string, body interface{}) (req *ret
 	req, err = retryablehttp.NewRequest(method, targetURL, body)
 	if err != nil {
 		return
+	}
+	if h.context != nil {
+		req = req.WithContext(h.context)
 	}
 
 	// Skip if unsafe is used

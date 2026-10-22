@@ -1,0 +1,20 @@
+{
+  "services": {
+    "webserver": {
+      "volumes": [
+        {"type": "bind", "source": "${AIG_PLATFORM_PROGRAM}/data", "target": "/app/data", "bind": {"create_host_path": false}},
+        {"type": "bind", "source": "${AIG_PLATFORM_PROGRAM}/db", "target": "/app/db", "bind": {"create_host_path": false}},
+        {"type": "bind", "source": "${AIG_PLATFORM_PROGRAM}/logs", "target": "/app/logs", "bind": {"create_host_path": false}},
+        {"type": "bind", "source": "${AIG_PLATFORM_PROGRAM}/uploads", "target": "/app/uploads", "bind": {"create_host_path": false}}
+      ]
+    },
+    "agent": {
+      "volumes": [
+        {"type": "volume", "source": "platform-checker", "target": "/api-checker-data"}
+      ]
+    }
+  },
+  "volumes": {
+    "platform-checker": {"name": "${AIG_PLATFORM_CHECKER_VOLUME}", "external": true}
+  }
+}

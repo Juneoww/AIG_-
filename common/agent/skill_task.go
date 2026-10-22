@@ -96,7 +96,7 @@ func (s *SkillTask) Execute(ctx context.Context, request TaskRequest, callbacks 
 				}
 
 				fileName := filepath.Join(tempDir, fmt.Sprintf("tmp-%d%s", time.Now().UnixMicro(), ext))
-				err := utils.DownloadFile(s.Server, request.SessionId, file, fileName)
+				err := utils.DownloadFileContext(ctx, s.Server, request.SessionId, file, fileName)
 				if err != nil {
 					return fmt.Errorf("download failed: %v", err)
 				}
@@ -116,7 +116,7 @@ func (s *SkillTask) Execute(ctx context.Context, request TaskRequest, callbacks 
 			}
 		} else {
 			extractPath, _ := filepath.Abs(filepath.Join(tempDir, fmt.Sprintf("tmp-%d", time.Now().UnixMicro())))
-			err := utils.GitClone(params.Content, extractPath, 10*time.Minute)
+			err := utils.GitCloneContext(ctx, params.Content, extractPath, 10*time.Minute)
 			if err != nil {
 				return fmt.Errorf("clone failed: %v", err)
 			}

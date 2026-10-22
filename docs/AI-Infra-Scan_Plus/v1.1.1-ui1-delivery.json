@@ -1,0 +1,112 @@
+{
+  "version": "v1.1.1-ui1",
+  "date": "2026-10-22",
+  "type": "web-ui-patch",
+  "branch": "fix/v1.1.1-web-port-mode",
+  "source_commit": "335c0d582180946da2bb3f360c0686151b4a6187",
+  "image_source_commit": "72baa7484d7b20749f7de0443cc059b5ecbf5874",
+  "artifacts": [
+    {
+      "name": "deploy-web-ui-v1.1.1-ui1.sh",
+      "size": 122564,
+      "sha256": "7a7f2158f0af6792033737423d0430d2d299e02b15a121b711e4012e2106bfad"
+    },
+    {
+      "name": "AIG-web-ui-v1.1.1-ui1-linux-amd64.tar.gz",
+      "size": 205713247,
+      "sha256": "6ba07d64fa5b2b88d826724dee3e3f65b3733fa0f3fd47d0c224acc3b95c81f9"
+    }
+  ],
+  "web_image": {
+    "reference": "ai-infra-guard-webserver:v1.1.1-ui1",
+    "id": "sha256:8436d1ea6585c09578dcab1bed783215894c29cfa007bea671e22987dd9272e8",
+    "binary_sha256": "2b7a1062ed8b44d58429a28fdb6b57e62a6c032cbd1abbcfb21c146ffbccf0c3"
+  },
+  "agent_image_unchanged": "sha256:4243bdc214fba86533fa2036b2de851d9697c0bcd5aeb73660341b2e25e4db4f",
+  "frontend": {
+    "static": "common/websocket/static",
+    "entry_scripts": [
+      "assets/main-ddpTgx_P.js"
+    ],
+    "javascript": {
+      "assets/main-ddpTgx_P.js": "0d9f4350448f85eb921ef0b41d8b4a5c5f76993b967aa7acf64ee4514d362dc3"
+    },
+    "port_modes": [
+      "full_tcp",
+      "fixed_ai"
+    ],
+    "request_parameter": "params.port_mode",
+    "binary_verified": "ai-infra-guard"
+  },
+  "verification": {
+    "frontend_guard_tests": 10,
+    "linux_platform_tool_tests": 54,
+    "cli_default_port_mode": "passed",
+    "portscan_ranges": "passed",
+    "actual_nmap_full_port_cancellation": {
+      "passed": true,
+      "target": "127.0.0.1",
+      "elapsed_seconds": 0.02
+    },
+    "actual_browser": {
+      "passed": true,
+      "modes": [
+        "full_tcp",
+        "fixed_ai"
+      ],
+      "saved_selection_and_request_params": true,
+      "all_scan_requests_intercepted": true,
+      "sessions_created": 0
+    },
+    "docker_transaction_scenarios": {
+      "v111_only_three_compose_layout": true,
+      "production_fixed_source_ids_unchanged_and_reject_fixture": true,
+      "check_readonly_no_image_import_lock_backup_or_layout_write": true,
+      "corrupt_package_rejected_before_transaction": true,
+      "missing_precise_rule_mount_rejected_without_stopping_web": true,
+      "busy_task_rejected_without_changing_status": true,
+      "rule_update_shared_lock_prevents_ui_upgrade": true,
+      "stop_command_error_after_actual_stop_restores_source": true,
+      "real_candidate_start_failure_restores_source_web": true,
+      "disk_full_diagnostic_does_not_block_source_recovery": true,
+      "real_wrapper_upgrade_only_changes_web_image_and_converter": true,
+      "agent_checker_ports_env_mounts_network_and_business_preserved": true,
+      "cold_business_and_checker_backup_created": true,
+      "rollback_failure_restores_patched_web_and_refreshes_retry_receipt": true,
+      "real_wrapper_rollback_preserves_all_post_patch_business_and_rules": true,
+      "access_teardown_failure_keeps_patched_web_and_accepted_writes": true,
+      "failed_opening_receipt_supports_write_preserving_rollback": true,
+      "final_source_web_agent_checker_and_business_verified": true
+    },
+    "rule_adapter_discovery": {
+      "002": true,
+      "004": true
+    },
+    "installer_sha256": "c39aa69e5512b739c1ff86e2a6e1814a4719457c8fcfa5376edfc1f196460c43",
+    "independent_review_unresolved_findings": 0,
+    "bash_syntax_and_help": "passed"
+  },
+  "artifact_audit": {
+    "passed": true,
+    "bundle_file_count": 10,
+    "fixed_package_sha256": "6ba07d64fa5b2b88d826724dee3e3f65b3733fa0f3fd47d0c224acc3b95c81f9",
+    "wrapper_tools_match_source": true,
+    "single_web_image_only": true,
+    "source_parent_layers_match": true,
+    "new_layer_only_web_binary": true,
+    "no_infrastructure_rules_in_any_layer": true,
+    "layer_entries_checked": 10418,
+    "web_image_id": "sha256:8436d1ea6585c09578dcab1bed783215894c29cfa007bea671e22987dd9272e8",
+    "source_commit": "335c0d582180946da2bb3f360c0686151b4a6187",
+    "image_source_commit": "72baa7484d7b20749f7de0443cc059b5ecbf5874"
+  },
+  "rollback": {
+    "web_ui_to_original_v111": "supported-preserves-current-business-data",
+    "legacy_platform_to_v110": "requires-separate-tool-original-container-id-receipt-no-longer-valid"
+  },
+  "notes": [
+    "Web-only offline patch; existing Agent and Checker volume remain in place.",
+    "No Go business source changes, no schema migration, no infrastructure rules payload.",
+    "Source is tracked on the patch branch; large delivery files stay outside Git source history."
+  ]
+}

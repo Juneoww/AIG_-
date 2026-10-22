@@ -20,6 +20,7 @@ package websocket
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
@@ -39,6 +40,7 @@ import (
 	"github.com/Tencent/AI-Infra-Guard/pkg/database"
 	"github.com/gin-gonic/gin"
 	"gorm.io/datatypes"
+	"gorm.io/gorm"
 	"trpc.group/trpc-go/trpc-go/log"
 )
 
@@ -64,6 +66,7 @@ type TaskManager struct {
 	fileConfig      *FileUploadConfig             // 新增：文件上传配置
 	sseManager      *SSEManager                   // 新增：SSE管理器
 	dispatchCounter uint64                        // round-robin 计数器（原子操作）
+	taskOwners      sync.Map                      // sessionID -> *taskOwnership，逐任务隔离连接代际。
 }
 
 func NewTaskManager(agentManager *AgentManager, taskStore *database.TaskStore, modelStore *database.ModelStore, fileConfig *FileUploadConfig, sseManager *SSEManager) *TaskManager {
@@ -191,12 +194,6 @@ func (tm *TaskManager) AddTaskApi(req *TaskCreateRequest) error {
 	idxApi := atomic.AddUint64(&tm.dispatchCounter, 1) - 1
 	selectedAgent := availableAgents[idxApi%uint64(len(availableAgents))]
 
-	// 4. 更新session的assigned_agent和开始时间
-	err = tm.taskStore.UpdateSessionAssignedAgent(req.SessionID, selectedAgent.agentID)
-	if err != nil {
-		return fmt.Errorf("无法更新session的assigned_agent")
-	}
-
 	// 6. 构造任务分配消息
 	taskMsg := WSMessage{
 		Type: WSMsgTypeTaskAssign,
@@ -217,8 +214,7 @@ func (tm *TaskManager) AddTaskApi(req *TaskCreateRequest) error {
 	selectedAgent.stateMu.RUnlock()
 
 	// 设置写超时并直接发送
-	selectedAgent.conn.SetWriteDeadline(time.Now().Add(writeWait))
-	err = selectedAgent.conn.WriteJSON(taskMsg)
+	err = selectedAgent.assignTask(tm, req.SessionID, taskMsg)
 	if err != nil {
 		return fmt.Errorf("下发任务给 %s 失败: %v", agentID, err)
 	}
@@ -235,6 +231,10 @@ func (tm *TaskManager) cleanupFailedTask(sessionId string, traceID string) {
 	tm.mu.Lock()
 	delete(tm.tasks, sessionId)
 	tm.mu.Unlock()
+	// 已归属连接的下发失败会保留错误证据；不能用预存清理删除其历史。
+	if status, err := tm.taskStore.GetSessionStatus(sessionId); err == nil && isTerminalTaskStatus(status) {
+		return
+	}
 
 	// 清理数据库中的预存任务
 	err := tm.taskStore.DeleteSession(sessionId)
@@ -278,13 +278,6 @@ func (tm *TaskManager) dispatchTask(sessionId string, traceID string) error {
 	selectedAgent := availableAgents[idxDisp%uint64(len(availableAgents))]
 	log.Infof("选择Agent (round-robin): trace_id=%s, sessionId=%s, agentId=%s, idx=%d", traceID, sessionId, selectedAgent.agentID, idxDisp)
 
-	// 4. 更新session的assigned_agent和开始时间
-	err := tm.taskStore.UpdateSessionAssignedAgent(task.SessionID, selectedAgent.agentID)
-	if err != nil {
-		log.Errorf("无法更新session的assigned_agent: trace_id=%s, sessionId=%s, agentId=%s, error=%v", traceID, task.SessionID, selectedAgent.agentID, err)
-		return fmt.Errorf("无法更新session的assigned_agent")
-	}
-
 	// 5. 处理params中的modelid，获取模型信息
 	enhancedParams := make(map[string]interface{})
 	for k, v := range task.Params {
@@ -309,10 +302,10 @@ func (tm *TaskManager) dispatchTask(sessionId string, traceID string) error {
 		//	return nil, fmt.Errorf("模型无效: %v", err)
 		//}
 		p := database.ModelParams{
-			Model:              model.ModelName,
-			Token:              model.Token,
-			BaseUrl:            model.BaseURL,
-			Limit:              model.Limit,
+			Model:   model.ModelName,
+			Token:   model.Token,
+			BaseUrl: model.BaseURL,
+			Limit:   model.Limit,
 		}
 		return &p, nil
 	}
@@ -405,8 +398,7 @@ func (tm *TaskManager) dispatchTask(sessionId string, traceID string) error {
 	}
 
 	// 设置写超时并直接发送
-	selectedAgent.conn.SetWriteDeadline(time.Now().Add(writeWait))
-	err = selectedAgent.conn.WriteJSON(taskMsg)
+	err := selectedAgent.assignTask(tm, task.SessionID, taskMsg)
 	if err != nil {
 		log.Errorf("下发任务给Agent失败: trace_id=%s, sessionId=%s, agentId=%s, error=%v", traceID, task.SessionID, agentID, err)
 		return fmt.Errorf("下发任务给 %s 失败: %v", agentID, err)
@@ -417,16 +409,28 @@ func (tm *TaskManager) dispatchTask(sessionId string, traceID string) error {
 }
 
 // HandleAgentEvent 处理来自Agent的事件
-func (tm *TaskManager) HandleAgentEvent(sessionId string, eventType string, event interface{}) {
+func (tm *TaskManager) HandleAgentEvent(sessionId string, eventType string, event interface{}) error {
 	log.Debugf("收到Agent事件: sessionId=%s, eventType=%s", sessionId, eventType)
 
-	if tm.shouldIgnoreAgentEvent(sessionId, eventType) {
-		log.Infof("忽略无效或终态任务的Agent事件: sessionId=%s, eventType=%s", sessionId, eventType)
-		return
+	status, err := tm.taskStore.GetSessionStatus(sessionId)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil
+		}
+		return fmt.Errorf("任务状态查询失败: %w", err)
+	}
+	// 取消后的执行器仍会回传已完成检测与覆盖缺口；保留报告，但不能把 terminated 改成 done。
+	if status == TaskStatusTerminated && eventType == WSMsgTypeResultUpdate {
+		return tm.handleEvent(sessionId, eventType, event)
+	}
+	if isTerminalTaskStatus(status) {
+		return nil
 	}
 
-	// 使用通用事件处理函数
-	tm.handleEvent(sessionId, eventType, event)
+	// 事件必须先入库成功，才能修改完成状态。
+	if err := tm.handleEvent(sessionId, eventType, event); err != nil {
+		return err
+	}
 
 	// 根据事件类型记录特定日志
 	switch eventType {
@@ -494,6 +498,7 @@ func (tm *TaskManager) HandleAgentEvent(sessionId string, eventType string, even
 	default:
 		log.Debugf("未知事件类型: sessionId=%s, eventType=%s", sessionId, eventType)
 	}
+	return nil
 }
 
 // convertToStruct 将 interface{} 转换为指定的结构体类型
@@ -534,7 +539,7 @@ func generateUUID() string {
 }
 
 // 通用事件处理函数
-func (tm *TaskManager) handleEvent(sessionId string, eventType string, event interface{}) {
+func (tm *TaskManager) handleEvent(sessionId string, eventType string, event interface{}) error {
 	log.Debugf("开始处理事件: sessionId=%s, eventType=%s", sessionId, eventType)
 
 	// 生成事件ID
@@ -547,7 +552,7 @@ func (tm *TaskManager) handleEvent(sessionId string, eventType string, event int
 	err := tm.taskStore.StoreEvent(id, sessionId, eventType, event, timestamp)
 	if err != nil {
 		log.Errorf("存储事件失败: sessionId=%s, eventType=%s, error=%v", sessionId, eventType, err)
-		return
+		return err
 	}
 
 	// 推送事件到SSE
@@ -559,11 +564,12 @@ func (tm *TaskManager) handleEvent(sessionId string, eventType string, event int
 		} else {
 			log.Errorf("推送事件到SSE失败: sessionId=%s, eventType=%s, error=%v", sessionId, eventType, err)
 		}
-		return
+		return nil
 	}
 
 	// 记录日志
 	log.Debugf("事件处理完成: sessionId=%s, eventType=%s", sessionId, eventType)
+	return nil
 }
 
 // getEventTimestamp 获取事件的时间戳
@@ -588,6 +594,10 @@ func getEventTimestamp(event interface{}) int64 {
 
 // TerminateTask 终止任务
 func (tm *TaskManager) TerminateTask(sessionId string, username string, traceID string) error {
+	// 与同一任务的事件状态转换串行，避免取消与最终报告互相覆盖状态。
+	ownership := tm.ownerFor(sessionId)
+	ownership.mu.Lock()
+	defer ownership.mu.Unlock()
 	log.Infof("开始终止任务: trace_id=%s, sessionId=%s, username=%s", traceID, sessionId, username)
 
 	// 检查任务是否存在
@@ -655,8 +665,7 @@ func (tm *TaskManager) notifyAgentToTerminate(agentID string, sessionId string, 
 			}
 
 			// 直接发送，无重试机制
-			agent.conn.SetWriteDeadline(time.Now().Add(writeWait))
-			err := agent.conn.WriteJSON(terminateMsg)
+			err := agent.writeJSON(terminateMsg)
 			if err != nil {
 				log.Errorf("发送终止消息给Agent %s失败: %v", agentID, err)
 			} else {
@@ -697,12 +706,12 @@ func isTerminalTaskStatus(status string) bool {
 }
 
 func (tm *TaskManager) shouldIgnoreAgentEvent(sessionId string, eventType string) bool {
-	session, err := tm.taskStore.GetSession(sessionId)
-	if err != nil || session == nil {
+	status, err := tm.taskStore.GetSessionStatus(sessionId)
+	if err != nil {
 		return true
 	}
 
-	if !isTerminalTaskStatus(session.Status) {
+	if !isTerminalTaskStatus(status) {
 		return false
 	}
 
@@ -1323,14 +1332,19 @@ func mustMarshalJSON(v interface{}) datatypes.JSON {
 
 // EstablishSSEConnection 建立SSE连接
 func (tm *TaskManager) EstablishSSEConnection(w http.ResponseWriter, sessionId string, username string, traceID string) error {
+	_, err := tm.establishSSEConnection(w, sessionId, username, traceID)
+	return err
+}
+
+func (tm *TaskManager) establishSSEConnection(w http.ResponseWriter, sessionId string, username string, traceID string) (*SSEConnection, error) {
 	log.Infof("建立SSE连接: trace_id=%s, sessionId=%s, username=%s", traceID, sessionId, username)
-	err := tm.sseManager.AddConnection(sessionId, username, w)
+	conn, err := tm.sseManager.addConnection(sessionId, username, w)
 	if err != nil {
 		log.Errorf("建立SSE连接失败: trace_id=%s, sessionId=%s, username=%s, error=%v", traceID, sessionId, username, err)
 	} else {
 		log.Infof("SSE连接建立成功: trace_id=%s, sessionId=%s, username=%s", traceID, sessionId, username)
 	}
-	return err
+	return conn, err
 }
 
 // CloseSSESession 关闭SSE会话

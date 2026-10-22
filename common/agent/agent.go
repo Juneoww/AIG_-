@@ -50,11 +50,16 @@ type Agent struct {
 	cancel   context.CancelFunc
 
 	// 配置
-	mutex sync.RWMutex
+	mutex          sync.RWMutex
+	writeMu        sync.Mutex
+	enqueueTimeout time.Duration
+	writeTimeout   time.Duration
+	taskWG         sync.WaitGroup
 }
 
 // TaskContext 任务上下文
 type TaskContext struct {
+	Context   context.Context
 	Request   TaskRequest
 	Status    string
 	Progress  int
@@ -74,15 +79,16 @@ type AgentConfig struct {
 func NewAgent(config AgentConfig) *Agent {
 	ctx, cancel := context.WithCancel(context.Background())
 	agent := &Agent{
-		info:      config.Info,
-		serverURL: config.ServerURL,
-		conn:      nil,
-		Tasks:     make([]*TaskContext, 0),
-		sendChan:  make(chan interface{}, 100),
-		ctx:       ctx,
-		cancel:    cancel,
-		mutex:     sync.RWMutex{},
-		taskFunc:  make([]TaskInterface, 0),
+		info:           config.Info,
+		serverURL:      config.ServerURL,
+		conn:           nil,
+		Tasks:          make([]*TaskContext, 0),
+		sendChan:       make(chan interface{}, 100),
+		ctx:            ctx,
+		cancel:         cancel,
+		mutex:          sync.RWMutex{},
+		taskFunc:       make([]TaskInterface, 0),
+		enqueueTimeout: 30 * time.Second, writeTimeout: 30 * time.Second,
 	}
 	return agent
 }
@@ -101,7 +107,9 @@ func (a *Agent) Start() error {
 		return fmt.Errorf("failed to connect to server: %v", err)
 	}
 	// 启动各种协程
-	go a.handleSend()
+	sendDone := make(chan struct{})
+	go func() { defer close(sendDone); a.handleSend() }()
+	defer func() { a.Stop(); a.taskWG.Wait(); <-sendDone }()
 	a.handleReceive()
 	return nil
 }
@@ -109,21 +117,59 @@ func (a *Agent) Start() error {
 // Stop 停止Agent
 func (a *Agent) Stop() {
 	a.mutex.Lock()
-	defer a.mutex.Unlock()
-
-	// 取消所有运行中的任务
 	for _, task := range a.Tasks {
 		if task.Cancel != nil {
 			task.Cancel()
 		}
 	}
-	// 发送停止信号
 	a.cancel()
-
-	// 关闭连接
-	if a.conn != nil {
-		a.conn.Close()
+	conn := a.conn
+	a.mutex.Unlock()
+	if conn != nil {
+		_ = conn.Close()
 	}
+}
+
+// enqueue 取消可打断有界队列等待；拥塞超时关闭连接，明确标记报告未完整回传。
+func (a *Agent) enqueue(ctx context.Context, msg interface{}) error {
+	if err := a.ctx.Err(); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	timeout := a.enqueueTimeout
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-a.ctx.Done():
+		return a.ctx.Err()
+	case <-ctx.Done():
+		return ctx.Err()
+	case a.sendChan <- msg:
+		return nil
+	case <-timer.C:
+		err := fmt.Errorf("agent send queue congested for %s; connection stopped to preserve incomplete coverage", timeout)
+		gologger.WithError(err).Errorln("Agent event delivery failed")
+		a.Stop()
+		return err
+	}
+}
+
+func (a *Agent) enqueueForTask(sessionId string, msg interface{}) error {
+	ctx := a.ctx
+	a.mutex.RLock()
+	for _, task := range a.Tasks {
+		if task.Request.SessionId == sessionId && task.Context != nil {
+			ctx = task.Context
+			break
+		}
+	}
+	a.mutex.RUnlock()
+	return a.enqueue(ctx, msg)
 }
 
 // connect 连接到服务器
@@ -133,24 +179,28 @@ func (a *Agent) connect() error {
 		return err
 	}
 	dialer := websocket.DefaultDialer
-	conn, _, err := dialer.Dial(u.String(), nil)
+	conn, _, err := dialer.DialContext(a.ctx, u.String(), nil)
 	if err != nil {
 		return err
 	}
 	conn.SetReadLimit(1024 * 1024 * 5)
+	a.mutex.Lock()
 	a.conn = conn
+	a.mutex.Unlock()
 
 	// 设置ping处理器：收到ping消息后自动回复pong
-	a.conn.SetPingHandler(func(appData string) error {
+	conn.SetPingHandler(func(appData string) error {
 		gologger.Debugln("Received ping message, sending pong response", appData)
-		return a.conn.WriteControl(websocket.PongMessage, []byte(""), time.Now().Add(time.Second*60))
+		a.writeMu.Lock()
+		defer a.writeMu.Unlock()
+		return conn.WriteControl(websocket.PongMessage, []byte(appData), time.Now().Add(5*time.Second))
 	})
 
 	// 设置pong处理器：收到pong消息时的处理逻辑
-	a.conn.SetPongHandler(func(appData string) error {
+	conn.SetPongHandler(func(appData string) error {
 		gologger.Debugln("Received pong message")
 		// 更新读取超时时间，保持连接活跃
-		return a.conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+		return conn.SetReadDeadline(time.Now().Add(120 * time.Second))
 	})
 
 	// 发送注册消息
@@ -163,8 +213,7 @@ func (a *Agent) register() error {
 		Type:    AgentMsgTypeRegister,
 		Content: a.info,
 	}
-	a.sendChan <- registerMsg
-	return nil
+	return a.enqueue(a.ctx, registerMsg)
 }
 
 // Disconnect 断开连接
@@ -178,16 +227,29 @@ func (a *Agent) Disconnect(reason string) error {
 
 // sendMessage 发送消息
 func (a *Agent) sendMessage(msg interface{}) error {
-	if a.conn == nil {
-		return fmt.Errorf("connection is nil")
+	if err := a.ctx.Err(); err != nil {
+		return err
 	}
-
 	data, err := json.Marshal(msg)
 	if err != nil {
 		return err
 	}
-
-	return a.conn.WriteMessage(websocket.TextMessage, data)
+	a.writeMu.Lock()
+	defer a.writeMu.Unlock()
+	a.mutex.RLock()
+	conn := a.conn
+	a.mutex.RUnlock()
+	if conn == nil {
+		return fmt.Errorf("connection is nil")
+	}
+	timeout := a.writeTimeout
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	if err = conn.SetWriteDeadline(time.Now().Add(timeout)); err != nil {
+		return err
+	}
+	return conn.WriteMessage(websocket.TextMessage, data)
 }
 
 // handleSend 处理发送队列
@@ -199,6 +261,8 @@ func (a *Agent) handleSend() {
 		case msg := <-a.sendChan:
 			if err := a.sendMessage(msg); err != nil {
 				gologger.WithError(err).Errorln("Failed to send message")
+				a.Stop()
+				return
 			}
 		}
 	}
@@ -206,24 +270,24 @@ func (a *Agent) handleSend() {
 
 // handleReceive 处理接收消息
 func (a *Agent) handleReceive() {
+	defer a.Stop()
+	a.mutex.RLock()
+	conn := a.conn
+	a.mutex.RUnlock()
+	if conn == nil {
+		return
+	}
 	for {
-		select {
-		case <-a.ctx.Done():
+		if a.ctx.Err() != nil {
 			return
-		default:
-			if a.conn == nil {
-				break
-			}
-			_, message, err := a.conn.ReadMessage()
-			if err != nil {
-				gologger.WithError(err).Errorln("Failed to read message")
-				a.conn = nil
-				return
-			}
-			gologger.Debugln("recv", string(message))
-			if err = a.processMessage(message); err != nil {
-				gologger.WithError(err).Errorln("Failed to send message")
-			}
+		}
+		_, message, err := conn.ReadMessage()
+		if err != nil {
+			gologger.WithError(err).Errorln("Failed to read message")
+			return
+		}
+		if err = a.processMessage(message); err != nil {
+			gologger.WithError(err).Errorln("Failed to process message")
 		}
 	}
 }
@@ -251,17 +315,23 @@ func (a *Agent) processMessage(data []byte) error {
 		}
 		// 加入task 上下文
 		taskContext := &TaskContext{
+			Context:   taskCtx,
 			Request:   task,
 			Status:    TaskStatusPending,
 			Progress:  0,
 			StartTime: time.Now(),
 			Cancel:    cancel,
 		}
+		a.mutex.Lock()
 		a.Tasks = append(a.Tasks, taskContext)
-		for _, taskFunc := range a.taskFunc {
+		functions := append([]TaskInterface(nil), a.taskFunc...)
+		a.mutex.Unlock()
+		matched := false
+		for _, taskFunc := range functions {
 			if taskType == taskFunc.GetName() {
 				gologger.Debugln("执行任务", taskFunc.GetName())
-				taskContext.Status = TaskStatusRunning
+				matched = true
+				a.setTaskStatus(taskContext, TaskStatusRunning)
 				// 创建回调函数集合
 				callbacks := TaskCallbacks{
 					ResultCallback: func(result map[string]interface{}) {
@@ -294,25 +364,36 @@ func (a *Agent) processMessage(data []byte) error {
 						gologger.Debugln("ErrorCallback", error)
 					},
 				}
-				go func() {
-					err := taskFunc.Execute(taskCtx, task, callbacks)
+				a.taskWG.Add(1)
+				go func(taskFunc TaskInterface) {
+					defer a.taskWG.Done()
+					defer cancel()
+					err := taskCtx.Err()
+					if err == nil {
+						err = taskFunc.Execute(taskCtx, task, callbacks)
+					}
 					if err != nil {
 						if errors.Is(err, context.Canceled) {
 							gologger.Infof("任务已取消: sessionId=%s", task.SessionId)
-							taskContext.Status = TaskStatusFailed
+							a.setTaskStatus(taskContext, TaskStatusFailed)
 							a.removeTask(task.SessionId)
 							return
 						}
-						taskContext.Status = TaskStatusFailed
+						a.setTaskStatus(taskContext, TaskStatusFailed)
 						a.SendTaskError(task.SessionId, err)
 						a.removeTask(task.SessionId)
 						return
 					}
-					taskContext.Status = TaskStatusComplete
+					a.setTaskStatus(taskContext, TaskStatusComplete)
 					a.removeTask(task.SessionId)
-				}()
+				}(taskFunc)
 				break
 			}
+		}
+		if !matched {
+			cancel()
+			a.removeTask(task.SessionId)
+			return a.SendError(task.SessionId, "unsupported task type")
 		}
 	case ServerMsgTypeTerminate:
 		var terminateReq TerminateTaskRequest
@@ -360,8 +441,8 @@ func (a *Agent) SendTaskResult(sessionId string, result map[string]interface{}) 
 	}
 
 	// 通过发送通道发送消息
-	a.sendChan <- resultUpdateContent
-	return nil
+	// 最终覆盖报告允许在单任务取消后回传；Agent 断连仍会中断。
+	return a.enqueue(a.ctx, resultUpdateContent)
 }
 
 // GetTaskBySessionId 根据SessionId获取任务上下文
@@ -371,10 +452,17 @@ func (a *Agent) GetTaskBySessionId(sessionId string) *TaskContext {
 
 	for _, task := range a.Tasks {
 		if task.Request.SessionId == sessionId {
-			return task
+			snapshot := *task
+			return &snapshot
 		}
 	}
 	return nil
+}
+
+func (a *Agent) setTaskStatus(task *TaskContext, status string) {
+	a.mutex.Lock()
+	task.Status = status
+	a.mutex.Unlock()
 }
 
 func (a *Agent) cancelTask(sessionId string) bool {
@@ -437,8 +525,7 @@ func (a *Agent) SendsToolUsedLog(sessionId, actionId, tool, planStepId, actionLo
 	}
 
 	// 通过发送通道发送消息
-	a.sendChan <- actionLogContent
-	return nil
+	return a.enqueueForTask(sessionId, actionLogContent)
 }
 
 func (a *Agent) SendToolUsed(sessionId, planStepId, statusId, description string, tools []Tool) error {
@@ -472,8 +559,7 @@ func (a *Agent) SendToolUsed(sessionId, planStepId, statusId, description string
 	}
 
 	// 通过发送通道发送消息
-	a.sendChan <- toolUsedContent
-	return nil
+	return a.enqueueForTask(sessionId, toolUsedContent)
 }
 
 // CreateTool 创建工具使用信息
@@ -521,8 +607,7 @@ func (a *Agent) SendNewPlanStep(sessionId, stepId, title string) error {
 	}
 
 	// 通过发送通道发送消息
-	a.sendChan <- newPlanStepContent
-	return nil
+	return a.enqueueForTask(sessionId, newPlanStepContent)
 }
 
 // SendStepStatusUpdate 发送更新步骤状态
@@ -557,8 +642,7 @@ func (a *Agent) SendStepStatusUpdate(sessionId, planStepId, statusId, agentStatu
 	}
 
 	// 通过发送通道发送消息
-	a.sendChan <- statusUpdateContent
-	return nil
+	return a.enqueueForTask(sessionId, statusUpdateContent)
 }
 
 // SendPlanUpdate 整体计划更新
@@ -571,7 +655,7 @@ func (a *Agent) SendPlanUpdate(sessionId string, tasks []SubTask) error {
 		ID:        msgId,
 		Type:      "planUpdate",
 		Timestamp: timestamp,
-		Tasks:     tasks,
+		Tasks:     append([]SubTask(nil), tasks...),
 	}
 
 	// 构建更新任务计划更新消息
@@ -590,8 +674,7 @@ func (a *Agent) SendPlanUpdate(sessionId string, tasks []SubTask) error {
 	}
 
 	// 通过发送通道发送消息
-	a.sendChan <- planUpdateContent
-	return nil
+	return a.enqueueForTask(sessionId, planUpdateContent)
 }
 
 // CreateSubTask 创建子任务的便捷方法
@@ -647,7 +730,6 @@ func (a *Agent) sendErrorEvent(sessionId, msg string, issues []TargetIssue) erro
 	}
 
 	// 通过发送通道发送消息
-	a.sendChan <- planUpdateContent
-	return nil
+	return a.enqueueForTask(sessionId, planUpdateContent)
 
 }

@@ -1,0 +1,5 @@
+FROM docker:28.5.1-dind AS engine
+FROM aig-independent-management:validation
+USER root
+COPY --from=engine /usr/local/bin/dockerd /usr/local/bin/containerd /usr/local/bin/containerd-shim-runc-v2 /usr/local/bin/runc /usr/local/bin/docker-proxy /usr/local/bin/docker-init /usr/local/bin/
+ENTRYPOINT ["dockerd", "--host=unix:///var/run/docker.sock", "--storage-driver=vfs", "--iptables=true"]

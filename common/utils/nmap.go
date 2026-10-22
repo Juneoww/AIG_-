@@ -19,9 +19,12 @@
 package utils
 
 import (
+	"bytes"
+	"context"
 	"encoding/xml"
 	"fmt"
 	"os/exec"
+	"time"
 )
 
 // 定义XML解析结构体
@@ -53,16 +56,28 @@ type State struct {
 }
 
 func NmapScan(target string, port string) (*NmapRun, error) {
+	return NmapScanContext(context.Background(), target, port)
+}
+
+// NmapScanContext 执行全量端口发现；取消会终止并等待子进程退出，不把未完成视为无开放端口。
+func NmapScanContext(ctx context.Context, target string, port string) (*NmapRun, error) {
 	// 检测nmap是否可用
 	_, err := exec.LookPath("nmap")
 	if err != nil {
 		return nil, fmt.Errorf("nmap不可用: %v", err)
 	}
 	// 执行nmap扫描（快速模式，无服务识别；--open 只输出开放端口，全端口扫描时避免XML过大）
-	cmd := exec.Command("nmap", "-T4", "--open", "-p", port, target, "-oX", "-")
-	output, err := cmd.CombinedOutput()
+	cmd := exec.CommandContext(ctx, "nmap", "-T4", "--open", "-p", port, target, "-oX", "-")
+	// stderr 不得混入 XML；WaitDelay 限制异常子进程遗留输出管道的清理等待。
+	cmd.WaitDelay = 3 * time.Second
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	output, err := cmd.Output()
+	if ctx.Err() != nil {
+		return nil, fmt.Errorf("nmap扫描未完成: %w", ctx.Err())
+	}
 	if err != nil {
-		return nil, fmt.Errorf("nmap扫描失败: %v\n输出: %s", err, string(output))
+		return nil, fmt.Errorf("nmap扫描未完成: %w; %s", err, stderr.String())
 	}
 	// 解析XML结果
 	var result NmapRun

@@ -20,6 +20,7 @@ package utils
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -28,15 +29,26 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/Tencent/AI-Infra-Guard/common/fingerprints/parser"
-	"github.com/Tencent/AI-Infra-Guard/internal/gologger"
 )
 
 // DownloadFile 下载文件
 // path 参数必须由调用方在调用前完成路径安全校验（防止路径穿越），
 // 本函数仅负责 HTTP 下载写入，不做路径验证。
 func DownloadFile(server, sessionId, uri, path string) error {
+	return DownloadFileContext(context.Background(), server, sessionId, uri, path)
+}
+
+// Context 入口将初始化/附件 HTTP 请求绑定到任务取消，并保留可配置操作截止。
+func DownloadFileContext(ctx context.Context, server, sessionId, uri, path string) error {
+	ctx, cancel, timeoutErr := serviceHTTPContext(ctx)
+	if timeoutErr != nil {
+		return timeoutErr
+	}
+	defer cancel()
+
 	// Validate that path is not empty and does not contain path traversal sequences.
 	// Callers are responsible for ensuring path is within an expected directory.
 	if path == "" || strings.Contains(path, "..") {
@@ -50,7 +62,7 @@ func DownloadFile(server, sessionId, uri, path string) error {
 	}
 	jsonData, err := json.Marshal(data)
 	// 创建请求并添加 header
-	req, err := http.NewRequest("POST", fmt.Sprintf("http://%s/api/v1/app/tasks/%s/downloadFile", server, sessionId), io.NopCloser(bytes.NewBuffer(jsonData)))
+	req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("http://%s/api/v1/app/tasks/%s/downloadFile", server, sessionId), io.NopCloser(bytes.NewBuffer(jsonData)))
 	if err != nil {
 		return err
 	}
@@ -98,6 +110,24 @@ type UploadFileResponse struct {
 
 // UploadFile 上传文件到服务器
 func UploadFile(server, filePath string) (*UploadFileResponse, error) {
+	timeout := 120 * time.Second
+	if raw := os.Getenv("AIG_UPLOAD_TIMEOUT"); raw != "" {
+		value, err := time.ParseDuration(raw)
+		if err != nil || value <= 0 {
+			return nil, fmt.Errorf("AIG_UPLOAD_TIMEOUT must be a positive duration")
+		}
+		timeout = value
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	return UploadFileContext(ctx, server, filePath)
+}
+
+// UploadFileContext 把上传及响应读取绑定到任务取消和调用方截止。
+func UploadFileContext(ctx context.Context, server, filePath string) (*UploadFileResponse, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	// 打开文件
 	file, err := os.Open(filePath)
 	if err != nil {
@@ -128,7 +158,7 @@ func UploadFile(server, filePath string) (*UploadFileResponse, error) {
 	}
 
 	// 创建 HTTP 请求
-	req, err := http.NewRequest("POST", fmt.Sprintf("http://%s/api/v1/app/tasks/uploadFile", server), &requestBody)
+	req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("http://%s/api/v1/app/tasks/uploadFile", server), &requestBody)
 	if err != nil {
 		return nil, fmt.Errorf("创建请求失败: %v", err)
 	}
@@ -141,14 +171,14 @@ func UploadFile(server, filePath string) (*UploadFileResponse, error) {
 	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("发送请求失败: %v", err)
+		return nil, fmt.Errorf("发送请求失败: %w", err)
 	}
 	defer resp.Body.Close()
 
 	// 读取响应体
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("读取响应失败: %v", err)
+		return nil, fmt.Errorf("读取响应失败: %w", err)
 	}
 
 	// 检查 HTTP 状态码
@@ -167,11 +197,21 @@ func UploadFile(server, filePath string) (*UploadFileResponse, error) {
 }
 
 func GetEvaluationsDetail(server, name string) ([]byte, error) {
+	return GetEvaluationsDetailContext(context.Background(), server, name)
+}
+
+func GetEvaluationsDetailContext(ctx context.Context, server, name string) ([]byte, error) {
+	ctx, cancel, err := serviceHTTPContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer cancel()
+
 	path := "/api/v1/knowledge/evaluations/" + name
 	// 创建 HTTP 请求
-	req, err := http.NewRequest("GET", fmt.Sprintf("http://%s%s", server, path), nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", fmt.Sprintf("http://%s%s", server, path), nil)
 	if err != nil {
-		return nil, fmt.Errorf("创建请求失败: %v", err)
+		return nil, fmt.Errorf("创建请求失败: %w", err)
 	}
 	req.Header.Set("X-APIKey", "zhuque")
 
@@ -179,14 +219,14 @@ func GetEvaluationsDetail(server, name string) ([]byte, error) {
 	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("发送请求失败: %v", err)
+		return nil, fmt.Errorf("发送请求失败: %w", err)
 	}
 	defer resp.Body.Close()
 
 	// 读取响应体
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("读取响应失败: %v", err)
+		return nil, fmt.Errorf("读取响应失败: %w", err)
 	}
 
 	// 检查 HTTP 状态码
@@ -205,6 +245,17 @@ func GetEvaluationsDetail(server, name string) ([]byte, error) {
 }
 
 func LoadRemoteFingerPrints(hostname string) ([]parser.FingerPrint, error) {
+	return LoadRemoteFingerPrintsContext(context.Background(), hostname)
+}
+
+// Context 入口将初始化/附件 HTTP 请求绑定到任务取消，并保留可配置操作截止。
+func LoadRemoteFingerPrintsContext(ctx context.Context, hostname string) ([]parser.FingerPrint, error) {
+	ctx, cancel, timeoutErr := serviceHTTPContext(ctx)
+	if timeoutErr != nil {
+		return nil, timeoutErr
+	}
+	defer cancel()
+
 	type msg struct {
 		Data struct {
 			FingerPrints []json.RawMessage `json:"items"`
@@ -213,7 +264,7 @@ func LoadRemoteFingerPrints(hostname string) ([]parser.FingerPrint, error) {
 		Message string `json:"message"`
 	}
 	// 创建请求并添加 header
-	req, err := http.NewRequest("GET", fmt.Sprintf("http://%s/api/v1/knowledge/fingerprints?page=1&size=9999", hostname), nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", fmt.Sprintf("http://%s/api/v1/knowledge/fingerprints?page=1&size=9999", hostname), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -241,8 +292,7 @@ func LoadRemoteFingerPrints(hostname string) ([]parser.FingerPrint, error) {
 	for _, raw := range m.Data.FingerPrints {
 		fp, err := parser.InitFingerPrintFromData(raw)
 		if err != nil {
-			gologger.WithError(err).Fatalf("无法解析指纹模板:%s", string(raw))
-			continue
+			return nil, fmt.Errorf("无法解析远程指纹模板: %w", err)
 		}
 		fps = append(fps, *fp)
 	}
@@ -250,6 +300,17 @@ func LoadRemoteFingerPrints(hostname string) ([]parser.FingerPrint, error) {
 }
 
 func LoadRemoteVulStruct(api string) ([]json.RawMessage, error) {
+	return LoadRemoteVulStructContext(context.Background(), api)
+}
+
+// Context 入口将初始化/附件 HTTP 请求绑定到任务取消，并保留可配置操作截止。
+func LoadRemoteVulStructContext(ctx context.Context, api string) ([]json.RawMessage, error) {
+	ctx, cancel, timeoutErr := serviceHTTPContext(ctx)
+	if timeoutErr != nil {
+		return nil, timeoutErr
+	}
+	defer cancel()
+
 	type msg struct {
 		Data struct {
 			Vuls  []json.RawMessage `json:"items"`
@@ -258,7 +319,7 @@ func LoadRemoteVulStruct(api string) ([]json.RawMessage, error) {
 		Message string `json:"message"`
 	}
 	// 创建请求并添加 header
-	req, err := http.NewRequest("GET", api, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", api, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -283,4 +344,21 @@ func LoadRemoteVulStruct(api string) ([]json.RawMessage, error) {
 		return nil, err
 	}
 	return m.Data.Vuls, nil
+}
+
+// serviceHTTPContext 为服务内部知识库和附件访问提供独立操作时限。
+func serviceHTTPContext(parent context.Context) (context.Context, context.CancelFunc, error) {
+	if parent == nil {
+		parent = context.Background()
+	}
+	timeout := 120 * time.Second
+	if value := os.Getenv("AIG_SERVICE_HTTP_TIMEOUT"); value != "" {
+		parsed, err := time.ParseDuration(value)
+		if err != nil || parsed <= 0 {
+			return nil, nil, fmt.Errorf("AIG_SERVICE_HTTP_TIMEOUT must be a positive duration")
+		}
+		timeout = parsed
+	}
+	ctx, cancel := context.WithTimeout(parent, timeout)
+	return ctx, cancel, nil
 }

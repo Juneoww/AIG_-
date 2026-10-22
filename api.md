@@ -1490,3 +1490,18 @@ except Exception as e:
 ## Technical Support
 
 For any issues, please contact the technical support team or refer to the project documentation.
+
+
+## v1.1.1 scan completion and Agent readiness
+
+`GET /api/v1/agents/status` returns `{"connected_count":1,"agents":[{"agent_id":"...","connected":true}]}` for registered live Agent connections. This read-only check does not start or resume tasks.
+
+Infrastructure results retain `total`, `score`, `results` and add:
+
+- `completion_status`: `complete`, `incomplete`, or `cancelled`.
+- `coverage`: `targets_total`, `scan_succeeded`, `scan_failed`, `scan_unfinished`, `discovery_failed`, `postprocess_failed`, `complete`.
+- `target_errors`: entries with `target`, `stage`, `error`.
+- Per-result `postprocess`: screenshot/upload/AI completion state and error.
+- `score_valid=false` means the score does not represent complete coverage; `score_scope=completed_targets_only` limits it to completed targets.
+
+Already obtained detections survive screenshot, upload, or AI failures. Partial zero-finding results do not establish a clean target. Disconnect errors preserve persisted events and fail only tasks owned by that connection; reconnection does not resume them automatically. Historical tasks are not silently rewritten on Web startup.

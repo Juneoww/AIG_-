@@ -22,15 +22,24 @@ import "github.com/Tencent/AI-Infra-Guard/pkg/vulstruct"
 
 // CallbackScanResult 扫描结果结构
 type CallbackScanResult struct {
-	TargetURL       string           `json:"target_url"`
-	StatusCode      int              `json:"status_code"`
-	Title           string           `json:"title"`
-	Fingerprint     string           `json:"fingerprint"`
-	Vulnerabilities []vulstruct.Info `json:"vulnerabilities,omitempty"`
-	Resp            string           `json:"-"`
-	ScreenShot      string           `json:"screenshot,omitempty"`
-	Reason          string           `json:"reason,omitempty"`
-	Summary         string           `json:"summary,omitempty"` // 漏洞总览
+	TargetURL       string             `json:"target_url"`
+	StatusCode      int                `json:"status_code"`
+	Title           string             `json:"title"`
+	Fingerprint     string             `json:"fingerprint"`
+	Vulnerabilities []vulstruct.Info   `json:"vulnerabilities,omitempty"`
+	Resp            string             `json:"-"`
+	ScreenShot      string             `json:"screenshot,omitempty"`
+	Reason          string             `json:"reason,omitempty"`
+	Summary         string             `json:"summary,omitempty"` // 漏洞总览
+	Postprocess     *PostprocessStatus `json:"postprocess,omitempty"`
+}
+
+// PostprocessStatus 保留截图证据与可选分析的实际完成状态，不影响基础检测结论。
+type PostprocessStatus struct {
+	Screenshot string `json:"screenshot"`
+	Upload     string `json:"upload"`
+	AI         string `json:"ai"`
+	Error      string `json:"error,omitempty"`
 }
 
 // CallbackProcessInfo 进度信息结构
