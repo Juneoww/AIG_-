@@ -23,8 +23,8 @@ env:
 
 jobs:
   build-and-push:
-    # v1.1.1 使用已验证的离线镜像；标签推送及手动指定此版本均不发布 Docker Hub 镜像。
-    if: ${{ !(github.event_name == 'push' && github.ref == 'refs/tags/v1.1.1') && !(github.event_name == 'workflow_dispatch' && inputs.tag == 'v1.1.1') }}
+    # v1.1.1 及 UI 补丁使用已验证离线镜像；标签推送及手动指定均不发布 Docker Hub。
+    if: ${{ !(github.event_name == 'push' && (github.ref == 'refs/tags/v1.1.1' || github.ref == 'refs/tags/v1.1.1-ui1')) && !(github.event_name == 'workflow_dispatch' && (inputs.tag == 'v1.1.1' || inputs.tag == 'v1.1.1-ui1')) }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
